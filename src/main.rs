@@ -8,6 +8,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::select;
 
 const CHEAP_SERVICE_URL: &str = "http://localhost:8001/payments";
 const FALLBACK_SERVICE_URL: &str = "http://localhost:8002/payments";
@@ -79,7 +80,15 @@ async fn send_to_service(payload: Payment, url: &str) -> anyhow::Result<StatusCo
     let client = reqwest::Client::new();
 
     // Example: POST to another service
-    let res = client.post(url).json(&payload).send().await;
+    let res = client.post(url).json(&payload).send();
+    let timeout = tokio::time::sleep(std::time::Duration::from_millis(500));
+    let res = select! {
+        res = res => res,
+        _ = timeout => {
+            // println!("Request to {} timed out", url);
+            return Err(anyhow::anyhow!("Request to {} timed out", url));
+        }
+    };
 
     let res = res.and_then(|res| res.error_for_status());
     match res {
