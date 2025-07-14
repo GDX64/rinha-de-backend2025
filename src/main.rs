@@ -55,8 +55,11 @@ async fn summary(State(state): State<WrappedState>) -> (StatusCode, Json<Value>)
 }
 
 #[debug_handler]
-async fn payments(State(state): State<WrappedState>, Json(payload): Json<Payment>) -> StatusCode {
-    let span = tracing::info_span!("payments", correlationId = payload.correlationId);
+async fn payments(
+    State(state): State<WrappedState>,
+    Json(payload): Json<PaymentGet>,
+) -> StatusCode {
+    let span = tracing::info_span!("payments", correlationId = payload.correlation_id);
     let main_process = try_process_payment(payload.clone(), state.clone()).instrument(span.clone());
     let timeout = tokio::time::sleep(std::time::Duration::from_millis(1400));
     let res = select! {
@@ -68,32 +71,42 @@ async fn payments(State(state): State<WrappedState>, Json(payload): Json<Payment
     };
     let _guard = span.enter();
     match res {
-        PaymentTryResult::CheapOk => {
-            state.add_payment_cheap(payload.amount);
+        PaymentTryResult::CheapOk(payment) => {
+            state.add_payment_cheap(payment);
             tracing::info!("Payment processed by cheap service");
             return StatusCode::CREATED;
         }
-        PaymentTryResult::FallbackOk => {
-            state.add_payment_fallback(payload.amount);
+        PaymentTryResult::FallbackOk(payment) => {
+            state.add_payment_fallback(payment);
             tracing::info!("Payment processed by fallback service");
             return StatusCode::CREATED;
         }
     }
 }
 
-async fn try_process_payment(payload: Payment, state: WrappedState) -> PaymentTryResult {
+async fn try_process_payment(payload: PaymentGet, state: WrappedState) -> PaymentTryResult {
+    let payment_post = payload.to_payment_post();
     loop {
-        let res = send_to_service(payload.clone(), CHEAP_SERVICE_URL, state.client.clone()).await;
+        let res = send_to_service(
+            payment_post.clone(),
+            CHEAP_SERVICE_URL,
+            state.client.clone(),
+        )
+        .await;
 
         let Err(_res) = res else {
-            return PaymentTryResult::CheapOk;
+            return PaymentTryResult::CheapOk(payment_post);
         };
 
-        let res =
-            send_to_service(payload.clone(), FALLBACK_SERVICE_URL, state.client.clone()).await;
+        let res = send_to_service(
+            payment_post.clone(),
+            FALLBACK_SERVICE_URL,
+            state.client.clone(),
+        )
+        .await;
 
         let Err(_res) = res else {
-            return PaymentTryResult::FallbackOk;
+            return PaymentTryResult::FallbackOk(payment_post);
         };
 
         //cooldown before retrying
@@ -103,7 +116,7 @@ async fn try_process_payment(payload: Payment, state: WrappedState) -> PaymentTr
 
 #[instrument(skip(payload, client))]
 async fn send_to_service(
-    payload: Payment,
+    payload: PaymentPost,
     url: &str,
     client: reqwest::Client,
 ) -> anyhow::Result<StatusCode> {
@@ -131,11 +144,33 @@ async fn send_to_service(
     }
 }
 
-// the input to our `create_user` handler
 #[derive(Deserialize, Serialize, Debug, Clone)]
-struct Payment {
-    correlationId: String,
+struct PaymentGet {
+    #[serde(rename = "correlationId")]
+    correlation_id: String,
     amount: f64,
+}
+
+impl PaymentGet {
+    fn to_payment_post(&self) -> PaymentPost {
+        PaymentPost {
+            correlation_id: self.correlation_id.clone(),
+            amount: self.amount,
+            requested_at: chrono::Utc::now()
+                .to_utc()
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+struct PaymentPost {
+    #[serde(rename = "correlationId")]
+    correlation_id: String,
+    amount: f64,
+    //example: "2025-07-15T12:34:56.000Z"
+    #[serde(rename = "requestedAt")]
+    requested_at: String,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -165,16 +200,16 @@ impl WrappedState {
         }
     }
 
-    fn add_payment_cheap(&self, amount: f64) {
+    fn add_payment_cheap(&self, payment: PaymentPost) {
         let mut state = self.state.lock().unwrap();
         state.total_requests_cheap += 1;
-        state.total_amount_cheap += amount;
+        state.total_amount_cheap += payment.amount;
     }
 
-    fn add_payment_fallback(&self, amount: f64) {
+    fn add_payment_fallback(&self, payment: PaymentPost) {
         let mut state = self.state.lock().unwrap();
         state.total_requests_fallback += 1;
-        state.total_amount_fallback += amount;
+        state.total_amount_fallback += payment.amount;
     }
 
     fn get_state(&self) -> AppState {
@@ -184,6 +219,6 @@ impl WrappedState {
 }
 
 enum PaymentTryResult {
-    CheapOk,
-    FallbackOk,
+    CheapOk(PaymentPost),
+    FallbackOk(PaymentPost),
 }
