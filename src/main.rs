@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use axum::{
     Json, Router, debug_handler,
-    extract::State,
+    extract::{Query, State},
     http::StatusCode,
     routing::{get, post},
 };
@@ -11,6 +11,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::select;
 use tracing::{Instrument, instrument};
+
+use crate::database::{PaymentPost, PaymentsDb};
+
+mod database;
 
 const CHEAP_SERVICE_URL: &str = "http://localhost:8001/payments";
 const FALLBACK_SERVICE_URL: &str = "http://localhost:8002/payments";
@@ -39,17 +43,20 @@ async fn main() {
 }
 
 // basic handler that responds with a static string
-async fn summary(State(state): State<WrappedState>) -> (StatusCode, Json<Value>) {
-    let state = state.get_state();
+async fn summary(
+    State(state): State<WrappedState>,
+    Query(query_data): Query<SummaryQuery>,
+) -> (StatusCode, Json<Value>) {
+    let state = state.get_state(query_data);
     let json = serde_json::json!({
-        "default":{
-            "totalRequests": state.total_requests_cheap,
-            "totalAmount": state.total_amount_cheap,
-        },
-        "fallback":{
-            "totalRequests": state.total_requests_fallback,
-            "totalAmount": state.total_amount_fallback,
-        }
+        // "default":{
+        //     "totalRequests": state.total_requests_cheap,
+        //     "totalAmount": state.total_amount_cheap,
+        // },
+        // "fallback":{
+        //     "totalRequests": state.total_requests_fallback,
+        //     "totalAmount": state.total_amount_fallback,
+        // }
     });
     return (StatusCode::OK, Json(json));
 }
@@ -163,22 +170,8 @@ impl PaymentGet {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
-struct PaymentPost {
-    #[serde(rename = "correlationId")]
-    correlation_id: String,
-    amount: f64,
-    //example: "2025-07-15T12:34:56.000Z"
-    #[serde(rename = "requestedAt")]
-    requested_at: String,
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone)]
 struct AppState {
-    total_requests_cheap: u64,
-    total_requests_fallback: u64,
-    total_amount_cheap: f64,
-    total_amount_fallback: f64,
+    db: PaymentsDb,
 }
 
 #[derive(Clone)]
@@ -187,34 +180,36 @@ struct WrappedState {
     client: Client,
 }
 
+#[derive(Deserialize, Serialize, Debug, Clone)]
+struct SummaryQuery {
+    from: Option<String>,
+    to: Option<String>,
+}
+
 impl WrappedState {
     fn new() -> Self {
         WrappedState {
             state: Arc::new(Mutex::new(AppState {
-                total_requests_cheap: 0,
-                total_requests_fallback: 0,
-                total_amount_cheap: 0.0,
-                total_amount_fallback: 0.0,
+                db: PaymentsDb::new().expect("Failed to initialize database"),
             })),
             client: Client::new(),
         }
     }
 
-    fn add_payment_cheap(&self, payment: PaymentPost) {
-        let mut state = self.state.lock().unwrap();
-        state.total_requests_cheap += 1;
-        state.total_amount_cheap += payment.amount;
-    }
+    fn add_payment_cheap(&self, payment: PaymentPost) {}
 
-    fn add_payment_fallback(&self, payment: PaymentPost) {
-        let mut state = self.state.lock().unwrap();
-        state.total_requests_fallback += 1;
-        state.total_amount_fallback += payment.amount;
-    }
+    fn add_payment_fallback(&self, payment: PaymentPost) {}
 
-    fn get_state(&self) -> AppState {
-        let state = self.state.lock().unwrap();
-        state.clone()
+    fn get_state(&self, query_data: SummaryQuery) -> () {
+        let start = query_data
+            .from
+            .unwrap_or("1970-01-01T00:00:00.000Z".to_string());
+        let end = query_data
+            .to
+            .unwrap_or("9999-12-31T23:59:59.999Z".to_string());
+
+        let start = chrono::DateTime::parse_from_rfc3339(&start).unwrap();
+        let end = chrono::DateTime::parse_from_rfc3339(&end).unwrap();
     }
 }
 
