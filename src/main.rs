@@ -58,7 +58,7 @@ async fn summary(State(state): State<WrappedState>) -> (StatusCode, Json<Value>)
 async fn payments(State(state): State<WrappedState>, Json(payload): Json<Payment>) -> StatusCode {
     let span = tracing::info_span!("payments", correlationId = payload.correlationId);
     let main_process = try_process_payment(payload.clone(), state.clone()).instrument(span.clone());
-    let timeout = tokio::time::sleep(std::time::Duration::from_millis(1200));
+    let timeout = tokio::time::sleep(std::time::Duration::from_millis(1400));
     let res = select! {
         res = main_process => res,
         _ = timeout => {
