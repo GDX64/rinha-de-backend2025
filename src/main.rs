@@ -6,6 +6,7 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::select;
@@ -56,7 +57,7 @@ async fn summary(State(state): State<WrappedState>) -> (StatusCode, Json<Value>)
 #[debug_handler]
 async fn payments(State(state): State<WrappedState>, Json(payload): Json<Payment>) -> StatusCode {
     let span = tracing::info_span!("payments", correlationId = payload.correlationId);
-    let main_process = try_process_payment(payload.clone()).instrument(span.clone());
+    let main_process = try_process_payment(payload.clone(), state.clone()).instrument(span.clone());
     let timeout = tokio::time::sleep(std::time::Duration::from_millis(1200));
     let res = select! {
         res = main_process => res,
@@ -80,15 +81,16 @@ async fn payments(State(state): State<WrappedState>, Json(payload): Json<Payment
     }
 }
 
-async fn try_process_payment(payload: Payment) -> PaymentTryResult {
+async fn try_process_payment(payload: Payment, state: WrappedState) -> PaymentTryResult {
     loop {
-        let res = send_to_service(payload.clone(), CHEAP_SERVICE_URL).await;
+        let res = send_to_service(payload.clone(), CHEAP_SERVICE_URL, state.client.clone()).await;
 
         let Err(_res) = res else {
             return PaymentTryResult::CheapOk;
         };
 
-        let res = send_to_service(payload.clone(), FALLBACK_SERVICE_URL).await;
+        let res =
+            send_to_service(payload.clone(), FALLBACK_SERVICE_URL, state.client.clone()).await;
 
         let Err(_res) = res else {
             return PaymentTryResult::FallbackOk;
@@ -99,10 +101,12 @@ async fn try_process_payment(payload: Payment) -> PaymentTryResult {
     }
 }
 
-#[instrument(skip(payload))]
-async fn send_to_service(payload: Payment, url: &str) -> anyhow::Result<StatusCode> {
-    let client = reqwest::Client::new();
-    // Example: POST to another service
+#[instrument(skip(payload, client))]
+async fn send_to_service(
+    payload: Payment,
+    url: &str,
+    client: reqwest::Client,
+) -> anyhow::Result<StatusCode> {
     let res = client.post(url).json(&payload).send();
     let timeout = tokio::time::sleep(std::time::Duration::from_millis(500));
     let res = select! {
@@ -145,6 +149,7 @@ struct AppState {
 #[derive(Clone)]
 struct WrappedState {
     state: Arc<Mutex<AppState>>,
+    client: Client,
 }
 
 impl WrappedState {
@@ -156,6 +161,7 @@ impl WrappedState {
                 total_amount_cheap: 0.0,
                 total_amount_fallback: 0.0,
             })),
+            client: Client::new(),
         }
     }
 
