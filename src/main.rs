@@ -9,6 +9,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::select;
+use tracing::{Instrument, instrument};
 
 const CHEAP_SERVICE_URL: &str = "http://localhost:8001/payments";
 const FALLBACK_SERVICE_URL: &str = "http://localhost:8002/payments";
@@ -16,7 +17,9 @@ const FALLBACK_SERVICE_URL: &str = "http://localhost:8002/payments";
 #[tokio::main]
 async fn main() {
     // initialize tracing
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
 
     let state = WrappedState::new();
 
@@ -28,7 +31,6 @@ async fn main() {
         .route("/payments", post(payments))
         .with_state(state);
 
-    // run our app with hyper, listening globally on port 3000
     let listener = tokio::net::TcpListener::bind("0.0.0.0:9999").await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
@@ -51,52 +53,55 @@ async fn summary(State(state): State<WrappedState>) -> (StatusCode, Json<Value>)
 
 #[debug_handler]
 async fn payments(State(state): State<WrappedState>, Json(payload): Json<Payment>) -> StatusCode {
-    // println!("Received payment: {:?}", payload);
-    // Create a reqwest client
+    let span = tracing::info_span!("payments", correlationId = payload.correlationId);
 
-    // Example: POST to another service
-    let res = send_to_service(payload.clone(), CHEAP_SERVICE_URL).await;
+    span.in_scope(|| tracing::info!("sending request to cheap service"));
+    let res = send_to_service(payload.clone(), CHEAP_SERVICE_URL)
+        .instrument(span.clone())
+        .await;
 
-    let Err(res) = res else {
+    let Err(_res) = res else {
         state.add_payment_cheap(payload.amount);
-        // println!("Response from external service: {:?}", res);
         return StatusCode::CREATED;
     };
-    // println!("Error sending request: {:?}", res);
 
-    let res = send_to_service(payload.clone(), FALLBACK_SERVICE_URL).await;
+    span.in_scope(|| tracing::info!("sending request to fallback service"));
+    let res = send_to_service(payload.clone(), FALLBACK_SERVICE_URL)
+        .instrument(span)
+        .await;
 
-    let Err(res) = res else {
+    let Err(_res) = res else {
         state.add_payment_fallback(payload.amount);
-        // println!("Response from fallback service: {:?}", res);
         return StatusCode::CREATED;
     };
 
-    // println!("Error sending request to fallback: {:?}", res);
     return StatusCode::INTERNAL_SERVER_ERROR;
 }
 
+#[instrument]
 async fn send_to_service(payload: Payment, url: &str) -> anyhow::Result<StatusCode> {
     let client = reqwest::Client::new();
-
+    tracing::info!("Sending request to {}", url);
     // Example: POST to another service
     let res = client.post(url).json(&payload).send();
     let timeout = tokio::time::sleep(std::time::Duration::from_millis(500));
     let res = select! {
         res = res => res,
         _ = timeout => {
-            // println!("Request to {} timed out", url);
+            tracing::warn!("the request timed out");
             return Err(anyhow::anyhow!("Request to {} timed out", url));
         }
     };
 
     let res = res.and_then(|res| res.error_for_status());
     match res {
-        Ok(res) => {
+        Ok(_res) => {
+            tracing::info!("payment success");
             // println!("Response from external service: {:?}", res);
             return Ok(StatusCode::CREATED);
         }
         Err(err) => {
+            tracing::warn!("payment error: {:?}", err.status());
             // println!("Error sending request: {:?}", err);
             anyhow::bail!("Failed to send request to external service");
         }
