@@ -19,6 +19,8 @@ async fn main() {
     // initialize tracing
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
+        .with_ansi(false)
+        .pretty()
         .init();
 
     let state = WrappedState::new();
@@ -54,41 +56,59 @@ async fn summary(State(state): State<WrappedState>) -> (StatusCode, Json<Value>)
 #[debug_handler]
 async fn payments(State(state): State<WrappedState>, Json(payload): Json<Payment>) -> StatusCode {
     let span = tracing::info_span!("payments", correlationId = payload.correlationId);
-
-    span.in_scope(|| tracing::info!("sending request to cheap service"));
-    let res = send_to_service(payload.clone(), CHEAP_SERVICE_URL)
-        .instrument(span.clone())
-        .await;
-
-    let Err(_res) = res else {
-        state.add_payment_cheap(payload.amount);
-        return StatusCode::CREATED;
+    let main_process = try_process_payment(payload.clone()).instrument(span.clone());
+    let timeout = tokio::time::sleep(std::time::Duration::from_millis(1200));
+    let res = select! {
+        res = main_process => res,
+        _ = timeout => {
+            span.in_scope(||tracing::warn!("the request timed out"));
+            return StatusCode::REQUEST_TIMEOUT;
+        }
     };
-
-    span.in_scope(|| tracing::info!("sending request to fallback service"));
-    let res = send_to_service(payload.clone(), FALLBACK_SERVICE_URL)
-        .instrument(span)
-        .await;
-
-    let Err(_res) = res else {
-        state.add_payment_fallback(payload.amount);
-        return StatusCode::CREATED;
-    };
-
-    return StatusCode::INTERNAL_SERVER_ERROR;
+    let _guard = span.enter();
+    match res {
+        PaymentTryResult::CheapOk => {
+            state.add_payment_cheap(payload.amount);
+            tracing::info!("Payment processed by cheap service");
+            return StatusCode::CREATED;
+        }
+        PaymentTryResult::FallbackOk => {
+            state.add_payment_fallback(payload.amount);
+            tracing::info!("Payment processed by fallback service");
+            return StatusCode::CREATED;
+        }
+    }
 }
 
-#[instrument]
+async fn try_process_payment(payload: Payment) -> PaymentTryResult {
+    loop {
+        let res = send_to_service(payload.clone(), CHEAP_SERVICE_URL).await;
+
+        let Err(_res) = res else {
+            return PaymentTryResult::CheapOk;
+        };
+
+        let res = send_to_service(payload.clone(), FALLBACK_SERVICE_URL).await;
+
+        let Err(_res) = res else {
+            return PaymentTryResult::FallbackOk;
+        };
+
+        //cooldown before retrying
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
+
+#[instrument(skip(payload))]
 async fn send_to_service(payload: Payment, url: &str) -> anyhow::Result<StatusCode> {
     let client = reqwest::Client::new();
-    tracing::info!("Sending request to {}", url);
     // Example: POST to another service
     let res = client.post(url).json(&payload).send();
     let timeout = tokio::time::sleep(std::time::Duration::from_millis(500));
     let res = select! {
         res = res => res,
         _ = timeout => {
-            tracing::warn!("the request timed out");
+            tracing::warn!("the service took too long to respond");
             return Err(anyhow::anyhow!("Request to {} timed out", url));
         }
     };
@@ -96,13 +116,12 @@ async fn send_to_service(payload: Payment, url: &str) -> anyhow::Result<StatusCo
     let res = res.and_then(|res| res.error_for_status());
     match res {
         Ok(_res) => {
-            tracing::info!("payment success");
+            tracing::info!("payment service success");
             // println!("Response from external service: {:?}", res);
             return Ok(StatusCode::CREATED);
         }
         Err(err) => {
-            tracing::warn!("payment error: {:?}", err.status());
-            // println!("Error sending request: {:?}", err);
+            tracing::warn!("payment service error: {:?}", err);
             anyhow::bail!("Failed to send request to external service");
         }
     }
@@ -156,4 +175,9 @@ impl WrappedState {
         let state = self.state.lock().unwrap();
         state.clone()
     }
+}
+
+enum PaymentTryResult {
+    CheapOk,
+    FallbackOk,
 }
