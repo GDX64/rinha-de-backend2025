@@ -44,15 +44,12 @@ impl PaymentsDb {
     }
 
     pub fn insert_payment(&self, post: &PaymentPost, kind: PaymentKind) -> anyhow::Result<()> {
-        let requested_at = post.requested_at_ts;
-        let cents = post.cents();
-
         self.conn.execute(
             "insert into payments (uuid, amount, requested_at, kind) values (?1, ?2, ?3, ?4)",
             rusqlite::params![
                 post.correlation_id,
                 post.cents(),
-                requested_at,
+                post.requested_at_ts,
                 kind.to_string()
             ],
         )?;

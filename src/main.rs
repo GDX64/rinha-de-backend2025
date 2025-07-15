@@ -175,12 +175,12 @@ struct PaymentGet {
 
 impl PaymentGet {
     fn to_payment_post(&self) -> PaymentPost {
-        let utc_now = chrono::Utc::now();
+        let unix_now = chrono::Local::now();
         PaymentPost {
             correlation_id: self.correlation_id.clone(),
             amount: self.amount,
-            requested_at: utc_now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-            requested_at_ts: utc_now.timestamp(),
+            requested_at: unix_now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            requested_at_ts: unix_now.timestamp_millis(),
         }
     }
 }
