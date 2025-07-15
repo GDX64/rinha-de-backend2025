@@ -34,7 +34,7 @@ impl PaymentsDb {
         conn.execute(
             "create table if not exists payments (
                   uuid text primary key,
-                  amount real not null,
+                  amount int not null,
                   requested_at timestamp not null,
                   kind text not null
              )",
@@ -44,12 +44,14 @@ impl PaymentsDb {
     }
 
     pub fn insert_payment(&self, post: &PaymentPost, kind: PaymentKind) -> anyhow::Result<()> {
-        let requested_at = Self::parse_date(&post.requested_at)?;
+        let requested_at = post.requested_at_ts;
+        let cents = post.cents();
+
         self.conn.execute(
             "insert into payments (uuid, amount, requested_at, kind) values (?1, ?2, ?3, ?4)",
             rusqlite::params![
                 post.correlation_id,
-                post.amount,
+                post.cents(),
                 requested_at,
                 kind.to_string()
             ],
@@ -80,7 +82,7 @@ impl PaymentsDb {
             .query_map(rusqlite::params![from, to], |row| {
                 Ok((
                     row.get::<usize, String>(0)?,
-                    row.get::<usize, f64>(1)?,
+                    row.get::<usize, i64>(1)?,
                     row.get::<usize, i64>(2)?,
                 ))
             })?
@@ -95,10 +97,10 @@ impl PaymentsDb {
 
         for (kind, total, count) in rows {
             if kind == "default" {
-                stats.default_total = total;
+                stats.default_total = (total as f64) / 100.0; // Assuming amount is stored in cents
                 stats.default_count = count as usize;
             } else if kind == "fallback" {
-                stats.fallback_total = total;
+                stats.fallback_total = (total as f64) / 100.0; // Assuming amount is stored in cents
                 stats.fallback_count = count as usize;
             }
         }
@@ -115,6 +117,14 @@ pub struct PaymentPost {
     //example: "2025-07-15T12:34:56.000Z"
     #[serde(rename = "requestedAt")]
     pub requested_at: String,
+    #[serde(skip_serializing)]
+    pub requested_at_ts: i64,
+}
+
+impl PaymentPost {
+    pub fn cents(&self) -> i64 {
+        (self.amount * 100.0).round() as i64
+    }
 }
 
 mod test {
@@ -123,10 +133,13 @@ mod test {
     #[allow(unused)]
     fn make_random_payment() -> PaymentPost {
         let id: String = (0..10).map(|_| fastrand::char('a'..='z')).collect();
+        let requested_at = "2025-07-15T12:34:56.000Z".to_string();
+        let utc_now = PaymentsDb::parse_date(&requested_at).unwrap();
         PaymentPost {
             correlation_id: id,
-            amount: fastrand::f64() * 100.0,
-            requested_at: "2025-07-15T12:34:56.000Z".to_string(),
+            amount: (fastrand::i64((0..10_000)) as f64) / 100.0,
+            requested_at,
+            requested_at_ts: utc_now,
         }
     }
 
@@ -145,7 +158,7 @@ mod test {
             .get_stats("2025-07-15T00:00:00.000Z", "2025-07-16T00:00:00.000Z")
             .expect("Failed to get range");
         assert_eq!(stats.default_count, 2);
-        assert_eq!(stats.default_total, payment.amount + payment2.amount);
+        assert_eq!(stats.default_total, (payment.amount + payment2.amount));
     }
 }
 
