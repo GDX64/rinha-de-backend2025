@@ -12,7 +12,7 @@ use serde_json::Value;
 use tokio::select;
 use tracing::{Instrument, instrument};
 
-use crate::database::{PaymentPost, PaymentsDb};
+use crate::database::{PaymentPost, PaymentsDb, Stats};
 
 mod database;
 
@@ -47,17 +47,24 @@ async fn summary(
     State(state): State<WrappedState>,
     Query(query_data): Query<SummaryQuery>,
 ) -> (StatusCode, Json<Value>) {
+    let span = tracing::info_span!("summary", from = ?query_data.from, to = ?query_data.to);
+    let _guard = span.enter();
     let state = state.get_state(query_data);
+    let Ok(stats) = state else {
+        tracing::error!("Failed to get stats: {:?}", state.err());
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(Value::Null));
+    };
     let json = serde_json::json!({
-        // "default":{
-        //     "totalRequests": state.total_requests_cheap,
-        //     "totalAmount": state.total_amount_cheap,
-        // },
-        // "fallback":{
-        //     "totalRequests": state.total_requests_fallback,
-        //     "totalAmount": state.total_amount_fallback,
-        // }
+        "default":{
+            "totalRequests": stats.default_count,
+            "totalAmount": stats.default_total,
+        },
+        "fallback":{
+            "totalRequests": stats.fallback_count,
+            "totalAmount": stats.fallback_total,
+        }
     });
+    tracing::info!("Returning summary: {:?}", json);
     return (StatusCode::OK, Json(json));
 }
 
@@ -79,12 +86,20 @@ async fn payments(
     let _guard = span.enter();
     match res {
         PaymentTryResult::CheapOk(payment) => {
-            state.add_payment_cheap(payment);
+            let result = state.add_payment_cheap(payment);
+            if let Err(e) = result {
+                tracing::error!("Failed to insert payment: {:?}", e);
+                return StatusCode::INTERNAL_SERVER_ERROR;
+            }
             tracing::info!("Payment processed by cheap service");
             return StatusCode::CREATED;
         }
         PaymentTryResult::FallbackOk(payment) => {
-            state.add_payment_fallback(payment);
+            let result = state.add_payment_fallback(payment);
+            if let Err(e) = result {
+                tracing::error!("Failed to insert payment: {:?}", e);
+                return StatusCode::INTERNAL_SERVER_ERROR;
+            }
             tracing::info!("Payment processed by fallback service");
             return StatusCode::CREATED;
         }
@@ -196,11 +211,25 @@ impl WrappedState {
         }
     }
 
-    fn add_payment_cheap(&self, payment: PaymentPost) {}
+    fn add_payment_cheap(&self, payment: PaymentPost) -> anyhow::Result<()> {
+        return self
+            .state
+            .lock()
+            .unwrap()
+            .db
+            .insert_payment(&payment, database::PaymentKind::Default);
+    }
 
-    fn add_payment_fallback(&self, payment: PaymentPost) {}
+    fn add_payment_fallback(&self, payment: PaymentPost) -> anyhow::Result<()> {
+        return self
+            .state
+            .lock()
+            .unwrap()
+            .db
+            .insert_payment(&payment, database::PaymentKind::Fallback);
+    }
 
-    fn get_state(&self, query_data: SummaryQuery) -> () {
+    fn get_state(&self, query_data: SummaryQuery) -> anyhow::Result<Stats> {
         let start = query_data
             .from
             .unwrap_or("1970-01-01T00:00:00.000Z".to_string());
@@ -208,8 +237,8 @@ impl WrappedState {
             .to
             .unwrap_or("9999-12-31T23:59:59.999Z".to_string());
 
-        let start = chrono::DateTime::parse_from_rfc3339(&start).unwrap();
-        let end = chrono::DateTime::parse_from_rfc3339(&end).unwrap();
+        let values = self.state.lock().unwrap().db.get_stats(&start, &end)?;
+        Ok(values)
     }
 }
 

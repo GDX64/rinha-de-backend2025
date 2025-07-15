@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize)]
@@ -9,6 +11,20 @@ pub struct DBPlayer {
 
 pub struct PaymentsDb {
     conn: rusqlite::Connection,
+}
+
+pub enum PaymentKind {
+    Default,
+    Fallback,
+}
+
+impl Display for PaymentKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PaymentKind::Default => write!(f, "default"),
+            PaymentKind::Fallback => write!(f, "fallback"),
+        }
+    }
 }
 
 impl PaymentsDb {
@@ -27,11 +43,16 @@ impl PaymentsDb {
         Ok(Self { conn })
     }
 
-    pub fn insert_payment(&self, post: &PaymentPost, kind: &str) -> anyhow::Result<()> {
+    pub fn insert_payment(&self, post: &PaymentPost, kind: PaymentKind) -> anyhow::Result<()> {
         let requested_at = Self::parse_date(&post.requested_at)?;
         self.conn.execute(
             "insert into payments (uuid, amount, requested_at, kind) values (?1, ?2, ?3, ?4)",
-            rusqlite::params![post.correlation_id, post.amount, requested_at, kind],
+            rusqlite::params![
+                post.correlation_id,
+                post.amount,
+                requested_at,
+                kind.to_string()
+            ],
         )?;
         Ok(())
     }
@@ -48,26 +69,41 @@ impl PaymentsDb {
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
     }
 
-    pub fn get_range(&self, from: &str, to: &str) -> anyhow::Result<Vec<PaymentPost>> {
+    pub fn get_stats(&self, from: &str, to: &str) -> anyhow::Result<Stats> {
         let from = Self::parse_date(from)?;
         let to = Self::parse_date(to)?;
 
         let mut stmt = self.conn.prepare(
-            "select uuid, amount, requested_at from payments where requested_at between ?1 and ?2",
+            "select kind, sum(amount), count(*) from payments where requested_at between ?1 and ?2 group by kind",
         )?;
-        let rows = stmt.query_map(rusqlite::params![from, to], |row| {
-            Ok(PaymentPost {
-                correlation_id: row.get(0)?,
-                amount: row.get(1)?,
-                requested_at: Self::date_from_millis(row.get::<usize, i64>(2)?),
-            })
-        })?;
+        let rows = stmt
+            .query_map(rusqlite::params![from, to], |row| {
+                Ok((
+                    row.get::<usize, String>(0)?,
+                    row.get::<usize, f64>(1)?,
+                    row.get::<usize, i64>(2)?,
+                ))
+            })?
+            .filter_map(|r| r.ok());
 
-        let mut payments = Vec::new();
-        for payment in rows {
-            payments.push(payment?);
+        let mut stats = Stats {
+            default_total: 0.0,
+            default_count: 0,
+            fallback_total: 0.0,
+            fallback_count: 0,
+        };
+
+        for (kind, total, count) in rows {
+            if kind == "default" {
+                stats.default_total = total;
+                stats.default_count = count as usize;
+            } else if kind == "fallback" {
+                stats.fallback_total = total;
+                stats.fallback_count = count as usize;
+            }
         }
-        Ok(payments)
+
+        Ok(stats)
     }
 }
 
@@ -82,22 +118,40 @@ pub struct PaymentPost {
 }
 
 mod test {
-    use crate::database::{PaymentPost, PaymentsDb};
+    use crate::database::{PaymentKind, PaymentPost, PaymentsDb};
+
+    #[allow(unused)]
+    fn make_random_payment() -> PaymentPost {
+        let id: String = (0..10).map(|_| fastrand::char('a'..='z')).collect();
+        PaymentPost {
+            correlation_id: id,
+            amount: fastrand::f64() * 100.0,
+            requested_at: "2025-07-15T12:34:56.000Z".to_string(),
+        }
+    }
 
     #[test]
     fn test_payment_post() {
         let db = PaymentsDb::new().expect("Failed to initialize database");
-        let payment = PaymentPost {
-            correlation_id: "12345".to_string(),
-            amount: 100.0,
-            requested_at: "2025-07-15T12:34:56.000Z".to_string(),
-        };
-        db.insert_payment(&payment, "default")
+        let payment = make_random_payment();
+        db.insert_payment(&payment, PaymentKind::Default)
             .expect("Failed to insert payment");
 
-        let payments = db
-            .get_range("2025-07-15T00:00:00.000Z", "2025-07-16T00:00:00.000Z")
+        let payment2 = make_random_payment();
+        db.insert_payment(&payment2, PaymentKind::Default)
+            .expect("Failed to insert payment");
+
+        let stats = db
+            .get_stats("2025-07-15T00:00:00.000Z", "2025-07-16T00:00:00.000Z")
             .expect("Failed to get range");
-        assert_eq!(payments.get(0).unwrap(), &payment);
+        assert_eq!(stats.default_count, 2);
+        assert_eq!(stats.default_total, payment.amount + payment2.amount);
     }
+}
+
+pub struct Stats {
+    pub default_total: f64,
+    pub default_count: usize,
+    pub fallback_total: f64,
+    pub fallback_count: usize,
 }
