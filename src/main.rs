@@ -28,7 +28,9 @@ async fn main() {
         .pretty()
         .init();
 
-    let state = WrappedState::new();
+    let (sender, receiver) = tokio::sync::mpsc::channel(100);
+    let state = WrappedState::new(sender);
+    create_worker(receiver, state.clone());
 
     // build our application with a route
     let app = Router::new()
@@ -73,31 +75,7 @@ async fn payments(
     State(state): State<WrappedState>,
     Json(payload): Json<PaymentGet>,
 ) -> StatusCode {
-    tokio::spawn(async move {
-        let span = tracing::info_span!("payments", correlationId = payload.correlation_id);
-        let res = try_process_payment(payload.clone(), state.clone())
-            .instrument(span.clone())
-            .await;
-        let _guard = span.enter();
-        match res {
-            PaymentTryResult::CheapOk(payment) => {
-                let result = state.add_payment_cheap(payment);
-                if let Err(e) = result {
-                    tracing::error!("Failed to insert payment: {:?}", e);
-                } else {
-                    tracing::info!("Payment processed by cheap service");
-                };
-            }
-            PaymentTryResult::FallbackOk(payment) => {
-                let result = state.add_payment_fallback(payment);
-                if let Err(e) = result {
-                    tracing::error!("Failed to insert payment: {:?}", e);
-                } else {
-                    tracing::info!("Payment processed by fallback service");
-                };
-            }
-        }
-    });
+    state.sender.send(payload).await.unwrap();
     return StatusCode::CREATED;
 }
 
@@ -243,6 +221,7 @@ struct AppState {
 struct WrappedState {
     state: Arc<Mutex<AppState>>,
     client: Client,
+    sender: tokio::sync::mpsc::Sender<PaymentGet>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -252,12 +231,13 @@ struct SummaryQuery {
 }
 
 impl WrappedState {
-    fn new() -> Self {
+    fn new(sender: tokio::sync::mpsc::Sender<PaymentGet>) -> Self {
         WrappedState {
             state: Arc::new(Mutex::new(AppState {
                 db: PaymentsDb::new().expect("Failed to initialize database"),
             })),
             client: Client::new(),
+            sender,
         }
     }
 
@@ -290,6 +270,36 @@ impl WrappedState {
         let values = self.state.lock().unwrap().db.get_stats(&start, &end)?;
         Ok(values)
     }
+}
+
+fn create_worker(mut receiver: tokio::sync::mpsc::Receiver<PaymentGet>, state: WrappedState) {
+    tokio::spawn(async move {
+        while let Some(payload) = receiver.recv().await {
+            let span = tracing::info_span!("payments", correlationId = payload.correlation_id);
+            let res = try_process_payment(payload.clone(), state.clone())
+                .instrument(span.clone())
+                .await;
+            let _guard = span.enter();
+            match res {
+                PaymentTryResult::CheapOk(payment) => {
+                    let result = state.add_payment_cheap(payment);
+                    if let Err(e) = result {
+                        tracing::error!("Failed to insert payment: {:?}", e);
+                    } else {
+                        tracing::info!("Payment processed by cheap service");
+                    };
+                }
+                PaymentTryResult::FallbackOk(payment) => {
+                    let result = state.add_payment_fallback(payment);
+                    if let Err(e) = result {
+                        tracing::error!("Failed to insert payment: {:?}", e);
+                    } else {
+                        tracing::info!("Payment processed by fallback service");
+                    };
+                }
+            }
+        }
+    });
 }
 
 enum PaymentTryResult {
