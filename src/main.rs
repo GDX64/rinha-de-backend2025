@@ -16,7 +16,7 @@ use crate::database::{PaymentPost, PaymentsDb, Stats};
 
 mod database;
 
-const CHEAP_SERVICE_URL: &str = "http://localhost:8001/payments";
+const DEFAULT_SERVICE_URL: &str = "http://localhost:8001/payments";
 const FALLBACK_SERVICE_URL: &str = "http://localhost:8002/payments";
 
 #[tokio::main]
@@ -73,37 +73,32 @@ async fn payments(
     State(state): State<WrappedState>,
     Json(payload): Json<PaymentGet>,
 ) -> StatusCode {
-    let span = tracing::info_span!("payments", correlationId = payload.correlation_id);
-    let main_process = try_process_payment(payload.clone(), state.clone()).instrument(span.clone());
-    let timeout = tokio::time::sleep(std::time::Duration::from_millis(1400));
-    let res = select! {
-        res = main_process => res,
-        _ = timeout => {
-            span.in_scope(||tracing::warn!("the request timed out"));
-            return StatusCode::REQUEST_TIMEOUT;
-        }
-    };
-    let _guard = span.enter();
-    match res {
-        PaymentTryResult::CheapOk(payment) => {
-            let result = state.add_payment_cheap(payment);
-            if let Err(e) = result {
-                tracing::error!("Failed to insert payment: {:?}", e);
-                return StatusCode::INTERNAL_SERVER_ERROR;
+    tokio::spawn(async move {
+        let span = tracing::info_span!("payments", correlationId = payload.correlation_id);
+        let res = try_process_payment(payload.clone(), state.clone())
+            .instrument(span.clone())
+            .await;
+        let _guard = span.enter();
+        match res {
+            PaymentTryResult::CheapOk(payment) => {
+                let result = state.add_payment_cheap(payment);
+                if let Err(e) = result {
+                    tracing::error!("Failed to insert payment: {:?}", e);
+                } else {
+                    tracing::info!("Payment processed by cheap service");
+                };
             }
-            tracing::info!("Payment processed by cheap service");
-            return StatusCode::CREATED;
-        }
-        PaymentTryResult::FallbackOk(payment) => {
-            let result = state.add_payment_fallback(payment);
-            if let Err(e) = result {
-                tracing::error!("Failed to insert payment: {:?}", e);
-                return StatusCode::INTERNAL_SERVER_ERROR;
+            PaymentTryResult::FallbackOk(payment) => {
+                let result = state.add_payment_fallback(payment);
+                if let Err(e) = result {
+                    tracing::error!("Failed to insert payment: {:?}", e);
+                } else {
+                    tracing::info!("Payment processed by fallback service");
+                };
             }
-            tracing::info!("Payment processed by fallback service");
-            return StatusCode::CREATED;
         }
-    }
+    });
+    return StatusCode::CREATED;
 }
 
 async fn try_process_payment(payload: PaymentGet, state: WrappedState) -> PaymentTryResult {
@@ -111,13 +106,22 @@ async fn try_process_payment(payload: PaymentGet, state: WrappedState) -> Paymen
     loop {
         let res = send_to_service(
             payment_post.clone(),
-            CHEAP_SERVICE_URL,
+            DEFAULT_SERVICE_URL,
             state.client.clone(),
         )
         .await;
 
-        let Err(_res) = res else {
-            return PaymentTryResult::CheapOk(payment_post);
+        match res {
+            SendToServiceResult::Ok => {
+                return PaymentTryResult::CheapOk(payment_post);
+            }
+            SendToServiceResult::AlreadyProcessed => {
+                tracing::info!("Payment already processed by cheap service");
+                return PaymentTryResult::CheapOk(payment_post);
+            }
+            SendToServiceResult::ErrRetry => {
+                tracing::warn!("Retrying payment processing due to error");
+            }
         };
 
         let res = send_to_service(
@@ -127,13 +131,28 @@ async fn try_process_payment(payload: PaymentGet, state: WrappedState) -> Paymen
         )
         .await;
 
-        let Err(_res) = res else {
-            return PaymentTryResult::FallbackOk(payment_post);
+        match res {
+            SendToServiceResult::Ok => {
+                return PaymentTryResult::FallbackOk(payment_post);
+            }
+            SendToServiceResult::AlreadyProcessed => {
+                tracing::info!("Payment already processed by fallback service");
+                return PaymentTryResult::FallbackOk(payment_post);
+            }
+            SendToServiceResult::ErrRetry => {
+                tracing::warn!("Retrying payment processing due to error");
+            }
         };
 
         //cooldown before retrying
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
     }
+}
+
+enum SendToServiceResult {
+    Ok,
+    AlreadyProcessed,
+    ErrRetry,
 }
 
 #[instrument(skip(payload, client))]
@@ -141,14 +160,14 @@ async fn send_to_service(
     payload: PaymentPost,
     url: &str,
     client: reqwest::Client,
-) -> anyhow::Result<StatusCode> {
+) -> SendToServiceResult {
     let res = client.post(url).json(&payload).send();
-    let timeout = tokio::time::sleep(std::time::Duration::from_millis(500));
+    let timeout = tokio::time::sleep(std::time::Duration::from_millis(2_000));
     let res = select! {
         res = res => res,
         _ = timeout => {
             tracing::warn!("the service took too long to respond");
-            return Err(anyhow::anyhow!("Request to {} timed out", url));
+            return SendToServiceResult::ErrRetry;
         }
     };
 
@@ -157,11 +176,18 @@ async fn send_to_service(
         Ok(_res) => {
             tracing::info!("payment service success");
             // println!("Response from external service: {:?}", res);
-            return Ok(StatusCode::CREATED);
+            return SendToServiceResult::Ok;
         }
         Err(err) => {
-            tracing::warn!("payment service error: {:?}", err);
-            anyhow::bail!("Failed to send request to external service");
+            tracing::warn!("payment service error: {:?}", err.status());
+            match err.status() {
+                Some(StatusCode::INTERNAL_SERVER_ERROR) => {
+                    return SendToServiceResult::ErrRetry;
+                }
+                _ => {
+                    return SendToServiceResult::AlreadyProcessed;
+                }
+            }
         }
     }
 }
