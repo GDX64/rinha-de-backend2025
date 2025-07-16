@@ -23,7 +23,7 @@ const FALLBACK_SERVICE_URL: &str = "http://localhost:8002";
 async fn main() {
     // initialize tracing
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
+        .with_max_level(tracing::Level::ERROR)
         .with_ansi(false)
         .pretty()
         .init();
@@ -53,7 +53,7 @@ async fn summary(
     let _guard = span.enter();
     let state = state.get_state(query_data);
     let Ok(stats) = state else {
-        tracing::error!("Failed to get stats: {:?}", state.err());
+        // tracing::error!("Failed to get stats: {:?}", state.err());
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(Value::Null));
     };
     let json = serde_json::json!({
@@ -66,7 +66,7 @@ async fn summary(
             "totalAmount": stats.fallback_total,
         }
     });
-    tracing::info!("Returning summary: {:?}", json);
+    // tracing::info!("Returning summary: {:?}", json);
     return (StatusCode::OK, Json(json));
 }
 
@@ -96,11 +96,11 @@ async fn try_process_payment(payload: PaymentGet, state: WrappedState) -> Paymen
                 return PaymentTryResult::CheapOk(payment_post);
             }
             SendToServiceResult::AlreadyProcessed => {
-                tracing::info!("Payment already processed by cheap service");
+                // tracing::info!("Payment already processed by cheap service");
                 return PaymentTryResult::CheapOk(payment_post);
             }
             SendToServiceResult::ErrRetry => {
-                tracing::warn!("Retrying payment processing due to error");
+                // tracing::warn!("Retrying payment processing due to error");
             }
         };
         is_retry = true;
@@ -118,11 +118,11 @@ async fn try_process_payment(payload: PaymentGet, state: WrappedState) -> Paymen
                 return PaymentTryResult::FallbackOk(payment_post);
             }
             SendToServiceResult::AlreadyProcessed => {
-                tracing::info!("Payment already processed by fallback service");
+                // tracing::info!("Payment already processed by fallback service");
                 return PaymentTryResult::FallbackOk(payment_post);
             }
             SendToServiceResult::ErrRetry => {
-                tracing::warn!("Retrying payment processing due to error");
+                // tracing::warn!("Retrying payment processing due to error");
             }
         };
 
@@ -159,7 +159,7 @@ async fn send_to_service(
     let res = select! {
         res = res => res,
         _ = timeout => {
-            tracing::warn!("the service took too long to respond");
+            // tracing::warn!("the service took too long to respond");
             return SendToServiceResult::ErrRetry;
         }
     };
@@ -167,11 +167,11 @@ async fn send_to_service(
     let res = res.and_then(|res| res.error_for_status());
     match res {
         Ok(_res) => {
-            tracing::info!("payment service success");
+            // tracing::info!("payment service success");
             return SendToServiceResult::Ok;
         }
         Err(err) => {
-            tracing::warn!("payment service error: {:?}", err.status());
+            // tracing::warn!("payment service error: {:?}", err.status());
             return SendToServiceResult::ErrRetry;
         }
     }
@@ -284,17 +284,17 @@ fn create_worker(mut receiver: tokio::sync::mpsc::Receiver<PaymentGet>, state: W
                 PaymentTryResult::CheapOk(payment) => {
                     let result = state.add_payment_cheap(payment);
                     if let Err(e) = result {
-                        tracing::error!("Failed to insert payment: {:?}", e);
+                        // tracing::error!("Failed to insert payment: {:?}", e);
                     } else {
-                        tracing::info!("Payment processed by cheap service");
+                        // tracing::info!("Payment processed by cheap service");
                     };
                 }
                 PaymentTryResult::FallbackOk(payment) => {
                     let result = state.add_payment_fallback(payment);
                     if let Err(e) = result {
-                        tracing::error!("Failed to insert payment: {:?}", e);
+                        // tracing::error!("Failed to insert payment: {:?}", e);
                     } else {
-                        tracing::info!("Payment processed by fallback service");
+                        // tracing::info!("Payment processed by fallback service");
                     };
                 }
             }
