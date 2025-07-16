@@ -28,7 +28,7 @@ async fn main() {
         .pretty()
         .init();
 
-    let (sender, receiver) = tokio::sync::mpsc::channel(100);
+    let (sender, receiver) = tokio::sync::mpsc::channel(100_000);
     let state = WrappedState::new(sender);
     create_worker(receiver, state.clone());
 
@@ -81,7 +81,7 @@ async fn payments(
 
 async fn try_process_payment(payload: PaymentGet, state: WrappedState) -> PaymentTryResult {
     let payment_post = payload.to_payment_post();
-    let mut is_retry = true;
+    let mut is_retry = false;
     loop {
         let res = send_to_service(
             payment_post.clone(),
