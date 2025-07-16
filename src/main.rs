@@ -16,8 +16,8 @@ use crate::database::{PaymentPost, PaymentsDb, Stats};
 
 mod database;
 
-const DEFAULT_SERVICE_URL: &str = "http://localhost:8001/payments";
-const FALLBACK_SERVICE_URL: &str = "http://localhost:8002/payments";
+const DEFAULT_SERVICE_URL: &str = "http://localhost:8001";
+const FALLBACK_SERVICE_URL: &str = "http://localhost:8002";
 
 #[tokio::main]
 async fn main() {
@@ -103,11 +103,13 @@ async fn payments(
 
 async fn try_process_payment(payload: PaymentGet, state: WrappedState) -> PaymentTryResult {
     let payment_post = payload.to_payment_post();
+    let mut is_retry = true;
     loop {
         let res = send_to_service(
             payment_post.clone(),
             DEFAULT_SERVICE_URL,
             state.client.clone(),
+            is_retry,
         )
         .await;
 
@@ -123,11 +125,13 @@ async fn try_process_payment(payload: PaymentGet, state: WrappedState) -> Paymen
                 tracing::warn!("Retrying payment processing due to error");
             }
         };
+        is_retry = true;
 
         let res = send_to_service(
             payment_post.clone(),
             FALLBACK_SERVICE_URL,
             state.client.clone(),
+            is_retry,
         )
         .await;
 
@@ -160,9 +164,20 @@ async fn send_to_service(
     payload: PaymentPost,
     url: &str,
     client: reqwest::Client,
+    is_retry: bool,
 ) -> SendToServiceResult {
-    let res = client.post(url).json(&payload).send();
-    let timeout = tokio::time::sleep(std::time::Duration::from_millis(2_000));
+    if is_retry {
+        match get_post(&payload, client.clone(), url).await {
+            GetPaymentResult::IsCreated => {
+                return SendToServiceResult::AlreadyProcessed;
+            }
+            GetPaymentResult::Unknown => {}
+        }
+    };
+
+    let post_url = format!("{}/payments", url);
+    let res = client.post(post_url).json(&payload).send();
+    let timeout = tokio::time::sleep(std::time::Duration::from_millis(1_000));
     let res = select! {
         res = res => res,
         _ = timeout => {
@@ -175,20 +190,29 @@ async fn send_to_service(
     match res {
         Ok(_res) => {
             tracing::info!("payment service success");
-            // println!("Response from external service: {:?}", res);
             return SendToServiceResult::Ok;
         }
         Err(err) => {
             tracing::warn!("payment service error: {:?}", err.status());
-            match err.status() {
-                Some(StatusCode::INTERNAL_SERVER_ERROR) => {
-                    return SendToServiceResult::ErrRetry;
-                }
-                _ => {
-                    return SendToServiceResult::AlreadyProcessed;
-                }
-            }
+            return SendToServiceResult::ErrRetry;
         }
+    }
+}
+
+enum GetPaymentResult {
+    IsCreated,
+    Unknown,
+}
+async fn get_post(post: &PaymentPost, client: Client, url: &str) -> GetPaymentResult {
+    let url = format!("{}/payments/{}", url, post.correlation_id);
+    let Ok(res) = client.get(&url).send().await else {
+        return GetPaymentResult::Unknown;
+    };
+    match res.status() {
+        StatusCode::OK => {
+            return GetPaymentResult::IsCreated;
+        }
+        _ => return GetPaymentResult::Unknown,
     }
 }
 
