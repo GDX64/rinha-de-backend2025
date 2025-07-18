@@ -26,6 +26,7 @@ services:
     environment:
       - DEFAULT_PAYMENT=http://host.docker.internal:8001
       - FALLBACK_PAYMENT=http://host.docker.internal:8002
+      - SIBLING_SERVICE_URL=http://api2:9999
     networks:
       - backend
       - payment-processor
@@ -37,6 +38,10 @@ services:
   api2:
     <<: *api
     hostname: api2
+    environment:
+      - DEFAULT_PAYMENT=http://host.docker.internal:8002
+      - FALLBACK_PAYMENT=http://host.docker.internal:8001
+      - SIBLING_SERVICE_URL=http://api1:9999
 
 networks:
   backend:

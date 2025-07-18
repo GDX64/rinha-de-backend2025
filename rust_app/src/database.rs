@@ -165,3 +165,18 @@ pub struct Stats {
     pub fallback_total: f64,
     pub fallback_count: usize,
 }
+
+impl Stats {
+    pub fn to_json(&self) -> serde_json::Value {
+        return serde_json::json!({
+            "default":{
+                "totalRequests": self.default_count,
+                "totalAmount": self.default_total,
+            },
+            "fallback":{
+                "totalRequests": self.fallback_count,
+                "totalAmount": self.fallback_total,
+            }
+        });
+    }
+}

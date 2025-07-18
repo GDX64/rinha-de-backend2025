@@ -1,5 +1,3 @@
-use std::sync::{Arc, Mutex};
-
 use axum::{
     Json, Router, debug_handler,
     extract::{Query, State},
@@ -9,6 +7,7 @@ use axum::{
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::{Arc, Mutex};
 use tokio::select;
 use tracing::{Instrument, instrument};
 
@@ -20,7 +19,7 @@ mod database;
 async fn main() {
     // initialize tracing
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::ERROR)
+        .with_max_level(tracing::Level::INFO)
         .with_ansi(false)
         .pretty()
         .init();
@@ -34,6 +33,7 @@ async fn main() {
     let app = Router::new()
         // `GET /` goes to `root`
         .route("/payments-summary", get(summary))
+        .route("/siblings-summary", get(sibling_summary))
         // `POST /users` goes to `create_user`
         .route("/payments", post(payments))
         .with_state(state);
@@ -42,29 +42,47 @@ async fn main() {
     axum::serve(listener, app).await.unwrap();
 }
 
-// basic handler that responds with a static string
+async fn sibling_summary(
+    State(state): State<WrappedState>,
+    Query(query_data): Query<SummaryQuery>,
+) -> (StatusCode, Json<Value>) {
+    let span = tracing::info_span!("sibling_summary", from = ?query_data.from, to = ?query_data.to);
+    let _guard = span.enter();
+    let stats = state.get_state(&query_data);
+
+    let Ok(stats) = stats else {
+        tracing::error!("Failed to get stats: {:?}", stats.err());
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(Value::Null));
+    };
+
+    let json = stats.to_json();
+    tracing::info!("Returning summary: {:?}", json);
+    return (StatusCode::OK, Json(json));
+}
+
 async fn summary(
     State(state): State<WrappedState>,
     Query(query_data): Query<SummaryQuery>,
 ) -> (StatusCode, Json<Value>) {
     let span = tracing::info_span!("summary", from = ?query_data.from, to = ?query_data.to);
-    let _guard = span.enter();
-    let state = state.get_state(query_data).await;
-    let Ok(stats) = state else {
-        // tracing::error!("Failed to get stats: {:?}", state.err());
+    let stats = span.in_scope(|| state.get_state(&query_data));
+
+    let Ok(mut stats) = stats else {
+        tracing::error!("Failed to get stats: {:?}", stats.err());
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(Value::Null));
     };
-    let json = serde_json::json!({
-        "default":{
-            "totalRequests": stats.default_count,
-            "totalAmount": stats.default_total,
-        },
-        "fallback":{
-            "totalRequests": stats.fallback_count,
-            "totalAmount": stats.fallback_total,
-        }
-    });
-    // tracing::info!("Returning summary: {:?}", json);
+
+    let merge_result = state
+        .merge_state_with_sibling(&query_data, &mut stats)
+        .instrument(span)
+        .await;
+
+    if let Err(err) = merge_result {
+        tracing::error!("Failed to merge state with sibling: {:?}", err);
+    }
+
+    let json = stats.to_json();
+    tracing::info!("Returning summary: {:?}", json);
     return (StatusCode::OK, Json(json));
 }
 
@@ -94,11 +112,11 @@ async fn try_process_payment(payload: PaymentGet, state: WrappedState) -> Paymen
                 return PaymentTryResult::CheapOk(payment_post);
             }
             SendToServiceResult::AlreadyProcessed => {
-                // tracing::info!("Payment already processed by cheap service");
+                tracing::info!("Payment already processed by cheap service");
                 return PaymentTryResult::CheapOk(payment_post);
             }
             SendToServiceResult::ErrRetry => {
-                // tracing::warn!("Retrying payment processing due to error");
+                tracing::warn!("Retrying payment processing due to error");
             }
         };
         is_retry = true;
@@ -116,11 +134,11 @@ async fn try_process_payment(payload: PaymentGet, state: WrappedState) -> Paymen
                 return PaymentTryResult::FallbackOk(payment_post);
             }
             SendToServiceResult::AlreadyProcessed => {
-                // tracing::info!("Payment already processed by fallback service");
+                tracing::info!("Payment already processed by fallback service");
                 return PaymentTryResult::FallbackOk(payment_post);
             }
             SendToServiceResult::ErrRetry => {
-                // tracing::warn!("Retrying payment processing due to error");
+                tracing::warn!("Retrying payment processing due to error");
             }
         };
 
@@ -165,7 +183,7 @@ async fn send_to_service(
     let res = select! {
         res = res => res,
         _ = timeout => {
-            // tracing::warn!("the service took too long to respond");
+            tracing::warn!("the service took too long to respond");
             return SendToServiceResult::ErrRetry;
         }
     };
@@ -173,11 +191,11 @@ async fn send_to_service(
     let res = res.and_then(|res| res.error_for_status());
     match res {
         Ok(_res) => {
-            // tracing::info!("payment service success");
+            tracing::info!("payment service success");
             return SendToServiceResult::Ok;
         }
         Err(err) => {
-            // tracing::warn!("payment service error: {:?}", err.status());
+            tracing::warn!("payment service error: {:?}", err.status());
             return SendToServiceResult::ErrRetry;
         }
     }
@@ -270,22 +288,41 @@ impl WrappedState {
             .insert_payment(&payment, database::PaymentKind::Fallback);
     }
 
-    async fn get_state(&self, query_data: SummaryQuery) -> anyhow::Result<Stats> {
+    fn get_state(&self, query_data: &SummaryQuery) -> anyhow::Result<Stats> {
         let start = query_data
             .from
+            .clone()
             .unwrap_or("1970-01-01T00:00:00.000Z".to_string());
         let end = query_data
             .to
+            .clone()
             .unwrap_or("9999-12-31T23:59:59.999Z".to_string());
 
-        let mut values = self.state.lock().unwrap().db.get_stats(&start, &end)?;
+        let values = self.state.lock().unwrap().db.get_stats(&start, &end)?;
+
+        Ok(values)
+    }
+
+    async fn merge_state_with_sibling(
+        &self,
+        query_data: &SummaryQuery,
+        values: &mut Stats,
+    ) -> anyhow::Result<()> {
         let sibling_service_url = self.state.lock().unwrap().sibling_service_url.clone();
+        let start = query_data
+            .from
+            .clone()
+            .unwrap_or("1970-01-01T00:00:00.000Z".to_string());
+        let end = query_data
+            .to
+            .clone()
+            .unwrap_or("9999-12-31T23:59:59.999Z".to_string());
 
         if let Some(url) = sibling_service_url {
             let client = self.client.clone();
             let res = client
                 .get(format!(
-                    "{}/payments-summary?from={}&to={}",
+                    "{}/siblings-summary?from={}&to={}",
                     url, start, end
                 ))
                 .send()
@@ -303,9 +340,9 @@ impl WrappedState {
             values.fallback_count += def_count;
             values.default_total += fallback_total;
             values.default_count += fallback_count;
+            return Ok(());
         };
-
-        Ok(values)
+        return Err(anyhow::anyhow!("Sibling service URL is not set"));
     }
 }
 
@@ -321,17 +358,17 @@ fn create_worker(mut receiver: tokio::sync::mpsc::Receiver<PaymentGet>, state: W
                 PaymentTryResult::CheapOk(payment) => {
                     let result = state.add_payment_cheap(payment);
                     if let Err(e) = result {
-                        // tracing::error!("Failed to insert payment: {:?}", e);
+                        tracing::error!("Failed to insert payment: {:?}", e);
                     } else {
-                        // tracing::info!("Payment processed by cheap service");
+                        tracing::info!("Payment processed by cheap service");
                     };
                 }
                 PaymentTryResult::FallbackOk(payment) => {
                     let result = state.add_payment_fallback(payment);
                     if let Err(e) = result {
-                        // tracing::error!("Failed to insert payment: {:?}", e);
+                        tracing::error!("Failed to insert payment: {:?}", e);
                     } else {
-                        // tracing::info!("Payment processed by fallback service");
+                        tracing::info!("Payment processed by fallback service");
                     };
                 }
             }
