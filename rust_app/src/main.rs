@@ -16,9 +16,6 @@ use crate::database::{PaymentPost, PaymentsDb, Stats};
 
 mod database;
 
-const DEFAULT_SERVICE_URL: &str = "http://localhost:8001";
-const FALLBACK_SERVICE_URL: &str = "http://localhost:8002";
-
 #[tokio::main]
 async fn main() {
     // initialize tracing
@@ -29,7 +26,8 @@ async fn main() {
         .init();
 
     let (sender, receiver) = tokio::sync::mpsc::channel(100_000);
-    let state = WrappedState::new(sender);
+    let sibling_service_url = std::env::var("SIBLING_SERVICE_URL").ok();
+    let state = WrappedState::new(sender, sibling_service_url);
     create_worker(receiver, state.clone());
 
     // build our application with a route
@@ -51,7 +49,7 @@ async fn summary(
 ) -> (StatusCode, Json<Value>) {
     let span = tracing::info_span!("summary", from = ?query_data.from, to = ?query_data.to);
     let _guard = span.enter();
-    let state = state.get_state(query_data);
+    let state = state.get_state(query_data).await;
     let Ok(stats) = state else {
         // tracing::error!("Failed to get stats: {:?}", state.err());
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(Value::Null));
@@ -85,7 +83,7 @@ async fn try_process_payment(payload: PaymentGet, state: WrappedState) -> Paymen
     loop {
         let res = send_to_service(
             payment_post.clone(),
-            DEFAULT_SERVICE_URL,
+            &default_service_url(),
             state.client.clone(),
             is_retry,
         )
@@ -107,7 +105,7 @@ async fn try_process_payment(payload: PaymentGet, state: WrappedState) -> Paymen
 
         let res = send_to_service(
             payment_post.clone(),
-            FALLBACK_SERVICE_URL,
+            &fallback_service_url(),
             state.client.clone(),
             is_retry,
         )
@@ -129,6 +127,14 @@ async fn try_process_payment(payload: PaymentGet, state: WrappedState) -> Paymen
         //cooldown before retrying
         tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
     }
+}
+
+fn fallback_service_url() -> String {
+    std::env::var("FALLBACK_PAYMENT").unwrap_or_else(|_| "http://localhost:8002".to_string())
+}
+
+fn default_service_url() -> String {
+    std::env::var("DEFAULT_PAYMENT").unwrap_or_else(|_| "http://localhost:8001".to_string())
 }
 
 enum SendToServiceResult {
@@ -215,6 +221,7 @@ impl PaymentGet {
 
 struct AppState {
     db: PaymentsDb,
+    sibling_service_url: Option<String>,
 }
 
 #[derive(Clone)]
@@ -231,10 +238,14 @@ struct SummaryQuery {
 }
 
 impl WrappedState {
-    fn new(sender: tokio::sync::mpsc::Sender<PaymentGet>) -> Self {
+    fn new(
+        sender: tokio::sync::mpsc::Sender<PaymentGet>,
+        sibling_service_url: Option<String>,
+    ) -> Self {
         WrappedState {
             state: Arc::new(Mutex::new(AppState {
                 db: PaymentsDb::new().expect("Failed to initialize database"),
+                sibling_service_url,
             })),
             client: Client::new(),
             sender,
@@ -259,7 +270,7 @@ impl WrappedState {
             .insert_payment(&payment, database::PaymentKind::Fallback);
     }
 
-    fn get_state(&self, query_data: SummaryQuery) -> anyhow::Result<Stats> {
+    async fn get_state(&self, query_data: SummaryQuery) -> anyhow::Result<Stats> {
         let start = query_data
             .from
             .unwrap_or("1970-01-01T00:00:00.000Z".to_string());
@@ -267,7 +278,33 @@ impl WrappedState {
             .to
             .unwrap_or("9999-12-31T23:59:59.999Z".to_string());
 
-        let values = self.state.lock().unwrap().db.get_stats(&start, &end)?;
+        let mut values = self.state.lock().unwrap().db.get_stats(&start, &end)?;
+        let sibling_service_url = self.state.lock().unwrap().sibling_service_url.clone();
+
+        if let Some(url) = sibling_service_url {
+            let client = self.client.clone();
+            let res = client
+                .get(format!(
+                    "{}/payments-summary?from={}&to={}",
+                    url, start, end
+                ))
+                .send()
+                .await?
+                .error_for_status()?;
+            let json: Value = res.json().await?;
+            let def = &json["default"];
+            let def_total = def["total"].as_f64().unwrap_or(0.0);
+            let def_count = def["count"].as_u64().unwrap_or(0) as usize;
+            let fallback = &json["fallback"];
+            let fallback_total = fallback["total"].as_f64().unwrap_or(0.0);
+            let fallback_count = fallback["count"].as_u64().unwrap_or(0) as usize;
+
+            values.fallback_total += def_total;
+            values.fallback_count += def_count;
+            values.default_total += fallback_total;
+            values.default_count += fallback_count;
+        };
+
         Ok(values)
     }
 }

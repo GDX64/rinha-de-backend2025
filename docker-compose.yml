@@ -1,33 +1,31 @@
 services:
-  # nginx:
-  #   image: nginx:1.25-alpine
-  #   container_name: rinha-nginx
-  #   volumes:
-  #     - ./nginx.conf:/etc/nginx/nginx.conf:ro
-  #   depends_on:
-  #     - api1
-  #     - api2
-  #   ports:
-  #     - "9999:9999"
-  #   networks:
-  #     - backend
-  #     - payment-processor
-  #   deploy:
-  #     resources:
-  #       limits:
-  #         cpus: "0.15"
-  #         memory: "15MB"
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: rinha-nginx
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - api1
+      - api2
+    ports:
+      - "9999:9999"
+    networks:
+      - backend
+      - payment-processor
+    deploy:
+      resources:
+        limits:
+          cpus: "0.15"
+          memory: "15MB"
 
   api1: &api
-    image: luizcordista/rinha-backend-2025:tag
+    build:
+      context: .
+      dockerfile: ./dockerfile
     hostname: api1
     environment:
-      - APP_PORT=8080
-      - REDIS_URL=redis:6379
-      - PROCESSOR_DEFAULT_URL=http://payment-processor-default:8080
-      - PROCESSOR_FALLBACK_URL=http://payment-processor-fallback:8080
-      - INSTANCE_ID=API-1
-      - WORKER_CONCURRENCY=16
+      - DEFAULT_PAYMENT=http://host.docker.internal:8001
+      - FALLBACK_PAYMENT=http://host.docker.internal:8002
     networks:
       - backend
       - payment-processor
@@ -35,7 +33,10 @@ services:
       resources:
         limits:
           cpus: "0.55"
-          memory: "30MB"
+          memory: "50MB"
+  api2:
+    <<: *api
+    hostname: api2
 
 networks:
   backend:
