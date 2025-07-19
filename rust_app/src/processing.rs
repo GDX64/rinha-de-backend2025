@@ -4,17 +4,78 @@ use tracing::{Instrument, instrument};
 
 use crate::{PaymentGet, WrappedState, database::PaymentPost};
 
-pub fn create_worker(mut receiver: tokio::sync::mpsc::Receiver<PaymentGet>, state: WrappedState) {
-    tokio::spawn(async move {
-        while let Some(payload) = receiver.recv().await {
+struct RequestWorker {
+    state: WrappedState,
+}
+
+impl RequestWorker {
+    fn new(state: WrappedState) -> Self {
+        RequestWorker { state }
+    }
+
+    async fn try_process_payment(&mut self, payload: PaymentGet) -> PaymentTryResult {
+        let payment_post = payload.to_payment_post();
+        let mut is_retry = false;
+        loop {
+            let res = send_to_service(
+                payment_post.clone(),
+                &default_service_url(),
+                self.state.client.clone(),
+                is_retry,
+            )
+            .await;
+
+            match res {
+                SendToServiceResult::Ok => {
+                    return PaymentTryResult::CheapOk(payment_post);
+                }
+                SendToServiceResult::AlreadyProcessed => {
+                    // tracing::info!("Payment already processed by cheap service");
+                    return PaymentTryResult::CheapOk(payment_post);
+                }
+                SendToServiceResult::ErrRetry(e) => {
+                    is_retry = true;
+                    tracing::warn!("Retrying payment processing due to error {}", e);
+                }
+            };
+
+            let res = send_to_service(
+                payment_post.clone(),
+                &fallback_service_url(),
+                self.state.client.clone(),
+                is_retry,
+            )
+            .await;
+
+            match res {
+                SendToServiceResult::Ok => {
+                    return PaymentTryResult::FallbackOk(payment_post);
+                }
+                SendToServiceResult::AlreadyProcessed => {
+                    // tracing::info!("Payment already processed by fallback service");
+                    return PaymentTryResult::FallbackOk(payment_post);
+                }
+                SendToServiceResult::ErrRetry(e) => {
+                    tracing::warn!("Retrying payment processing due to error {}", e);
+                }
+            };
+
+            //cooldown before retrying
+            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+        }
+    }
+
+    async fn payment_loop(mut self, mut recv: tokio::sync::mpsc::Receiver<PaymentGet>) {
+        while let Some(payload) = recv.recv().await {
             let span = tracing::info_span!("payments", correlationId = payload.correlation_id);
-            let res = try_process_payment(payload.clone(), state.clone())
+            let res = self
+                .try_process_payment(payload.clone())
                 .instrument(span.clone())
                 .await;
             let _guard = span.enter();
             match res {
                 PaymentTryResult::CheapOk(payment) => {
-                    let result = state.add_payment_cheap(payment);
+                    let result = self.state.add_payment_cheap(payment);
                     if let Err(e) = result {
                         tracing::error!("Failed to insert payment: {:?}", e);
                     } else {
@@ -22,7 +83,7 @@ pub fn create_worker(mut receiver: tokio::sync::mpsc::Receiver<PaymentGet>, stat
                     };
                 }
                 PaymentTryResult::FallbackOk(payment) => {
-                    let result = state.add_payment_fallback(payment);
+                    let result = self.state.add_payment_fallback(payment);
                     if let Err(e) = result {
                         tracing::error!("Failed to insert payment: {:?}", e);
                     } else {
@@ -31,59 +92,12 @@ pub fn create_worker(mut receiver: tokio::sync::mpsc::Receiver<PaymentGet>, stat
                 }
             }
         }
-    });
+    }
 }
 
-async fn try_process_payment(payload: PaymentGet, state: WrappedState) -> PaymentTryResult {
-    let payment_post = payload.to_payment_post();
-    let mut is_retry = false;
-    loop {
-        let res = send_to_service(
-            payment_post.clone(),
-            &default_service_url(),
-            state.client.clone(),
-            is_retry,
-        )
-        .await;
-
-        match res {
-            SendToServiceResult::Ok => {
-                return PaymentTryResult::CheapOk(payment_post);
-            }
-            SendToServiceResult::AlreadyProcessed => {
-                // tracing::info!("Payment already processed by cheap service");
-                return PaymentTryResult::CheapOk(payment_post);
-            }
-            SendToServiceResult::ErrRetry(e) => {
-                is_retry = true;
-                tracing::warn!("Retrying payment processing due to error {}", e);
-            }
-        };
-
-        let res = send_to_service(
-            payment_post.clone(),
-            &fallback_service_url(),
-            state.client.clone(),
-            is_retry,
-        )
-        .await;
-
-        match res {
-            SendToServiceResult::Ok => {
-                return PaymentTryResult::FallbackOk(payment_post);
-            }
-            SendToServiceResult::AlreadyProcessed => {
-                // tracing::info!("Payment already processed by fallback service");
-                return PaymentTryResult::FallbackOk(payment_post);
-            }
-            SendToServiceResult::ErrRetry(e) => {
-                tracing::warn!("Retrying payment processing due to error {}", e);
-            }
-        };
-
-        //cooldown before retrying
-        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-    }
+pub fn create_worker(receiver: tokio::sync::mpsc::Receiver<PaymentGet>, state: WrappedState) {
+    let worker = RequestWorker::new(state);
+    tokio::spawn(worker.payment_loop(receiver));
 }
 
 enum PaymentTryResult {
