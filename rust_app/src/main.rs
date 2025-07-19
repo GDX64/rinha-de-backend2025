@@ -329,17 +329,18 @@ impl WrappedState {
                 .await?
                 .error_for_status()?;
             let json: Value = res.json().await?;
+            tracing::info!("Received sibling summary: {:?}", json);
             let def = &json["default"];
-            let def_total = def["total"].as_f64().unwrap_or(0.0);
-            let def_count = def["count"].as_u64().unwrap_or(0) as usize;
+            let def_total = def["totalAmount"].as_f64().unwrap_or(0.0);
+            let def_count = def["totalRequests"].as_u64().unwrap_or(0) as usize;
             let fallback = &json["fallback"];
-            let fallback_total = fallback["total"].as_f64().unwrap_or(0.0);
-            let fallback_count = fallback["count"].as_u64().unwrap_or(0) as usize;
+            let fallback_total = fallback["totalAmount"].as_f64().unwrap_or(0.0);
+            let fallback_count = fallback["totalRequests"].as_u64().unwrap_or(0) as usize;
 
-            values.fallback_total += def_total;
-            values.fallback_count += def_count;
-            values.default_total += fallback_total;
-            values.default_count += fallback_count;
+            values.fallback_total += fallback_total;
+            values.fallback_count += fallback_count;
+            values.default_total += def_total;
+            values.default_count += def_count;
             return Ok(());
         };
         return Err(anyhow::anyhow!("Sibling service URL is not set"));
