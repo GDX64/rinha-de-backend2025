@@ -68,9 +68,17 @@ impl PaymentsDb {
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
     }
 
-    pub fn get_stats(&self, from: &str, to: &str) -> anyhow::Result<Stats> {
-        let from = Self::parse_date(from)?;
-        let to = Self::parse_date(to)?;
+    pub fn get_stats(&self, from: Option<&str>, to: Option<&str>) -> anyhow::Result<Stats> {
+        let from = if let Some(from) = from {
+            Self::parse_date(from)?
+        } else {
+            0
+        };
+        let to = if let Some(to) = to {
+            Self::parse_date(to)?
+        } else {
+            chrono::Utc::now().timestamp_millis()
+        };
 
         let mut stmt = self.conn.prepare(
             "select kind, sum(amount), count(*) from payments where requested_at between ?1 and ?2 group by kind",
@@ -152,7 +160,10 @@ mod test {
             .expect("Failed to insert payment");
 
         let stats = db
-            .get_stats("2025-07-15T00:00:00.000Z", "2025-07-16T00:00:00.000Z")
+            .get_stats(
+                Some("2025-07-15T00:00:00.000Z"),
+                Some("2025-07-16T00:00:00.000Z"),
+            )
             .expect("Failed to get range");
         assert_eq!(stats.default_count, 2);
         assert_eq!(stats.default_total, (payment.amount + payment2.amount));

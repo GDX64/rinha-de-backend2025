@@ -56,7 +56,7 @@ async fn sibling_summary(
     };
 
     let json = stats.to_json();
-    tracing::info!("Returning summary: {:?}", json);
+    // tracing::info!("Returning summary: {:?}", json);
     return (StatusCode::OK, Json(json));
 }
 
@@ -82,7 +82,7 @@ async fn summary(
     }
 
     let json = stats.to_json();
-    tracing::info!("Returning summary: {:?}", json);
+    // tracing::info!("Returning summary: {:?}", json);
     return (StatusCode::OK, Json(json));
 }
 
@@ -112,14 +112,14 @@ async fn try_process_payment(payload: PaymentGet, state: WrappedState) -> Paymen
                 return PaymentTryResult::CheapOk(payment_post);
             }
             SendToServiceResult::AlreadyProcessed => {
-                tracing::info!("Payment already processed by cheap service");
+                // tracing::info!("Payment already processed by cheap service");
                 return PaymentTryResult::CheapOk(payment_post);
             }
-            SendToServiceResult::ErrRetry => {
-                tracing::warn!("Retrying payment processing due to error");
+            SendToServiceResult::ErrRetry(e) => {
+                is_retry = true;
+                tracing::warn!("Retrying payment processing due to error {}", e);
             }
         };
-        is_retry = true;
 
         let res = send_to_service(
             payment_post.clone(),
@@ -134,11 +134,11 @@ async fn try_process_payment(payload: PaymentGet, state: WrappedState) -> Paymen
                 return PaymentTryResult::FallbackOk(payment_post);
             }
             SendToServiceResult::AlreadyProcessed => {
-                tracing::info!("Payment already processed by fallback service");
+                // tracing::info!("Payment already processed by fallback service");
                 return PaymentTryResult::FallbackOk(payment_post);
             }
-            SendToServiceResult::ErrRetry => {
-                tracing::warn!("Retrying payment processing due to error");
+            SendToServiceResult::ErrRetry(e) => {
+                tracing::warn!("Retrying payment processing due to error {}", e);
             }
         };
 
@@ -158,7 +158,7 @@ fn default_service_url() -> String {
 enum SendToServiceResult {
     Ok,
     AlreadyProcessed,
-    ErrRetry,
+    ErrRetry(anyhow::Error),
 }
 
 #[instrument(skip(payload, client))]
@@ -184,19 +184,18 @@ async fn send_to_service(
         res = res => res,
         _ = timeout => {
             tracing::warn!("the service took too long to respond");
-            return SendToServiceResult::ErrRetry;
+            return SendToServiceResult::ErrRetry(anyhow::anyhow!("timeout"));
         }
     };
 
     let res = res.and_then(|res| res.error_for_status());
     match res {
         Ok(_res) => {
-            tracing::info!("payment service success");
+            // tracing::info!("payment service success");
             return SendToServiceResult::Ok;
         }
         Err(err) => {
-            tracing::warn!("payment service error: {:?}", err.status());
-            return SendToServiceResult::ErrRetry;
+            return SendToServiceResult::ErrRetry(anyhow::anyhow!(err));
         }
     }
 }
@@ -289,17 +288,9 @@ impl WrappedState {
     }
 
     fn get_state(&self, query_data: &SummaryQuery) -> anyhow::Result<Stats> {
-        let start = query_data
-            .from
-            .clone()
-            .unwrap_or("1970-01-01T00:00:00.000Z".to_string());
-        let end = query_data
-            .to
-            .clone()
-            .unwrap_or("9999-12-31T23:59:59.999Z".to_string());
-
-        let values = self.state.lock().unwrap().db.get_stats(&start, &end)?;
-
+        let start = query_data.from.as_ref().map(|s| s.as_str());
+        let end = query_data.to.as_ref().map(|s| s.as_str());
+        let values = self.state.lock().unwrap().db.get_stats(start, end)?;
         Ok(values)
     }
 
@@ -309,27 +300,20 @@ impl WrappedState {
         values: &mut Stats,
     ) -> anyhow::Result<()> {
         let sibling_service_url = self.state.lock().unwrap().sibling_service_url.clone();
-        let start = query_data
-            .from
-            .clone()
-            .unwrap_or("1970-01-01T00:00:00.000Z".to_string());
-        let end = query_data
-            .to
-            .clone()
-            .unwrap_or("9999-12-31T23:59:59.999Z".to_string());
 
         if let Some(url) = sibling_service_url {
             let client = self.client.clone();
-            let res = client
-                .get(format!(
-                    "{}/siblings-summary?from={}&to={}",
-                    url, start, end
-                ))
-                .send()
-                .await?
-                .error_for_status()?;
+            let res = client.get(format!("{}/siblings-summary", url));
+
+            let res = if let (Some(from), Some(to)) = (&query_data.from, &query_data.to) {
+                res.query(&[("from", from), ("to", to)])
+            } else {
+                res
+            };
+
+            let res = res.send().await?.error_for_status()?;
             let json: Value = res.json().await?;
-            tracing::info!("Received sibling summary: {:?}", json);
+            // tracing::info!("Received sibling summary: {:?}", json);
             let def = &json["default"];
             let def_total = def["totalAmount"].as_f64().unwrap_or(0.0);
             let def_count = def["totalRequests"].as_u64().unwrap_or(0) as usize;
@@ -361,7 +345,7 @@ fn create_worker(mut receiver: tokio::sync::mpsc::Receiver<PaymentGet>, state: W
                     if let Err(e) = result {
                         tracing::error!("Failed to insert payment: {:?}", e);
                     } else {
-                        tracing::info!("Payment processed by cheap service");
+                        // tracing::info!("Payment processed by cheap service");
                     };
                 }
                 PaymentTryResult::FallbackOk(payment) => {
@@ -369,7 +353,7 @@ fn create_worker(mut receiver: tokio::sync::mpsc::Receiver<PaymentGet>, state: W
                     if let Err(e) = result {
                         tracing::error!("Failed to insert payment: {:?}", e);
                     } else {
-                        tracing::info!("Payment processed by fallback service");
+                        // tracing::info!("Payment processed by fallback service");
                     };
                 }
             }
