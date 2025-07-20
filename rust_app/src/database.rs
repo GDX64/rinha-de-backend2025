@@ -126,7 +126,6 @@ pub struct PaymentPost {
     //example: "2025-07-15T12:34:56.000Z"
     #[serde(rename = "requestedAt")]
     pub requested_at: String,
-    #[serde(skip_serializing)]
     pub requested_at_ts: i64,
     pub processed_on: Option<PaymentKind>,
 }

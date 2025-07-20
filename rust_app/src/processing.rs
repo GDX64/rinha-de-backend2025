@@ -89,9 +89,7 @@ impl RequestWorker {
             let result = self.state.send_payment_to_db(&payment).await;
             if let Err(e) = result {
                 tracing::error!("Failed to save payment on db: {:?}", e);
-            } else {
-                tracing::info!("Payment saved with success");
-            };
+            }
         }
     }
 }
