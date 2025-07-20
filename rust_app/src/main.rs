@@ -11,7 +11,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tracing::Instrument;
+use tracing::instrument;
 
 mod app_state;
 mod database;
@@ -27,65 +27,59 @@ async fn main() {
         .init();
 
     let (sender, receiver) = tokio::sync::mpsc::channel(100_000);
-    let sibling_service_url = std::env::var("SIBLING_SERVICE_URL").ok();
-    let state = WrappedState::new(sender, sibling_service_url);
+    let db_service_url = std::env::var("DB_URL").ok();
+    let state = WrappedState::new(sender, db_service_url);
     create_worker(receiver, state.clone());
 
-    // build our application with a route
     let app = Router::new()
-        // `GET /` goes to `root`
         .route("/payments-summary", get(summary))
-        .route("/siblings-summary", get(sibling_summary))
-        // `POST /users` goes to `create_user`
         .route("/payments", post(payments))
+        .route("/db-save", post(db_save))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:9999").await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
 
-async fn sibling_summary(
+async fn db_save(
     State(state): State<WrappedState>,
-    Query(query_data): Query<SummaryQuery>,
-) -> (StatusCode, Json<Value>) {
-    let span = tracing::info_span!("sibling_summary", from = ?query_data.from, to = ?query_data.to);
+    Json(payload): Json<PaymentPost>,
+) -> StatusCode {
+    let span = tracing::info_span!("db_save", correlationId = payload.correlation_id);
     let _guard = span.enter();
-    let stats = state.get_state(&query_data);
-
-    let Ok(stats) = stats else {
-        tracing::error!("Failed to get stats: {:?}", stats.err());
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(Value::Null));
-    };
-
-    let json = stats.to_json();
-    // tracing::info!("Returning summary: {:?}", json);
-    return (StatusCode::OK, Json(json));
+    match state.add_on_db(payload) {
+        Ok(_) => StatusCode::CREATED,
+        Err(e) => {
+            tracing::error!("Failed to save payment: {:?}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
 }
 
+#[instrument(skip(state))]
 async fn summary(
     State(state): State<WrappedState>,
     Query(query_data): Query<SummaryQuery>,
 ) -> (StatusCode, Json<Value>) {
-    let span = tracing::info_span!("summary", from = ?query_data.from, to = ?query_data.to);
-    let stats = span.in_scope(|| state.get_state(&query_data));
+    if is_db_service() {
+        tracing::info!("Getting summary from local DB");
+        let stats = state.get_state(&query_data);
+        let Ok(stats) = stats else {
+            tracing::error!("Failed to get stats: {:?}", stats.err());
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(Value::Null));
+        };
 
-    let Ok(mut stats) = stats else {
-        tracing::error!("Failed to get stats: {:?}", stats.err());
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(Value::Null));
-    };
-
-    let merge_result = state
-        .merge_state_with_sibling(&query_data, &mut stats)
-        .instrument(span)
-        .await;
-
-    if let Err(err) = merge_result {
-        tracing::error!("Failed to merge state with sibling: {:?}", err);
+        let json = stats.to_json();
+        return (StatusCode::OK, Json(json));
+    } else {
+        tracing::info!("Getting summary from DB service");
+        let value = state.get_from_db_service(&query_data).await;
+        let Ok(value) = value else {
+            tracing::error!("Failed to get summary from DB service: {:?}", value.err());
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(Value::Null));
+        };
+        return (StatusCode::OK, Json(value));
     }
-
-    let json = stats.to_json();
-    // tracing::info!("Returning summary: {:?}", json);
-    return (StatusCode::OK, Json(json));
 }
 
 #[debug_handler]
@@ -112,6 +106,13 @@ impl PaymentGet {
             amount: self.amount,
             requested_at: unix_now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             requested_at_ts: unix_now.timestamp_millis(),
+            processed_on: None,
         }
     }
+}
+
+fn is_db_service() -> bool {
+    std::env::var("IS_DB_SERVICE")
+        .map(|v| v == "true")
+        .unwrap_or(false)
 }

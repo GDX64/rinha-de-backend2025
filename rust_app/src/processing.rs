@@ -2,7 +2,10 @@ use reqwest::{Client, StatusCode};
 use tokio::select;
 use tracing::{Instrument, instrument};
 
-use crate::{PaymentGet, WrappedState, database::PaymentPost};
+use crate::{
+    PaymentGet, WrappedState,
+    database::{PaymentKind, PaymentPost},
+};
 
 struct RequestWorker {
     state: WrappedState,
@@ -73,24 +76,22 @@ impl RequestWorker {
                 .instrument(span.clone())
                 .await;
             let _guard = span.enter();
-            match res {
-                PaymentTryResult::CheapOk(payment) => {
-                    let result = self.state.add_payment_cheap(payment);
-                    if let Err(e) = result {
-                        tracing::error!("Failed to insert payment: {:?}", e);
-                    } else {
-                        // tracing::info!("Payment processed by cheap service");
-                    };
+            let payment = match res {
+                PaymentTryResult::CheapOk(mut payment) => {
+                    payment.processed_on = Some(PaymentKind::Default);
+                    payment
                 }
-                PaymentTryResult::FallbackOk(payment) => {
-                    let result = self.state.add_payment_fallback(payment);
-                    if let Err(e) = result {
-                        tracing::error!("Failed to insert payment: {:?}", e);
-                    } else {
-                        // tracing::info!("Payment processed by fallback service");
-                    };
+                PaymentTryResult::FallbackOk(mut payment) => {
+                    payment.processed_on = Some(PaymentKind::Fallback);
+                    payment
                 }
-            }
+            };
+            let result = self.state.send_payment_to_db(&payment).await;
+            if let Err(e) = result {
+                tracing::error!("Failed to save payment on db: {:?}", e);
+            } else {
+                // tracing::info!("Payment processed by cheap service");
+            };
         }
     }
 }

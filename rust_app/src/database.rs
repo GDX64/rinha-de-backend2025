@@ -13,6 +13,7 @@ pub struct PaymentsDb {
     conn: rusqlite::Connection,
 }
 
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub enum PaymentKind {
     Default,
     Fallback,
@@ -43,7 +44,10 @@ impl PaymentsDb {
         Ok(Self { conn })
     }
 
-    pub fn insert_payment(&self, post: &PaymentPost, kind: PaymentKind) -> anyhow::Result<()> {
+    pub fn insert_payment(&self, post: &PaymentPost) -> anyhow::Result<()> {
+        let Some(kind) = post.processed_on.as_ref() else {
+            return Err(anyhow::anyhow!("Payment must have a processed_on field"));
+        };
         self.conn.execute(
             "insert into payments (uuid, amount, requested_at, kind) values (?1, ?2, ?3, ?4)",
             rusqlite::params![
@@ -62,11 +66,11 @@ impl PaymentsDb {
             .map_err(|e| anyhow::anyhow!("Invalid date format: {}", e))
     }
 
-    fn date_from_millis(millis: i64) -> String {
-        chrono::DateTime::<chrono::Utc>::from_timestamp_millis(millis)
-            .unwrap()
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-    }
+    // fn date_from_millis(millis: i64) -> String {
+    //     chrono::DateTime::<chrono::Utc>::from_timestamp_millis(millis)
+    //         .unwrap()
+    //         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    // }
 
     pub fn get_stats(&self, from: Option<&str>, to: Option<&str>) -> anyhow::Result<Stats> {
         let from = if let Some(from) = from {
@@ -124,6 +128,7 @@ pub struct PaymentPost {
     pub requested_at: String,
     #[serde(skip_serializing)]
     pub requested_at_ts: i64,
+    pub processed_on: Option<PaymentKind>,
 }
 
 impl PaymentPost {
@@ -145,6 +150,7 @@ mod test {
             amount: (fastrand::i64((0..10_000)) as f64) / 100.0,
             requested_at,
             requested_at_ts: utc_now,
+            processed_on: Some(PaymentKind::Default),
         }
     }
 
@@ -152,11 +158,11 @@ mod test {
     fn test_payment_post() {
         let db = PaymentsDb::new().expect("Failed to initialize database");
         let payment = make_random_payment();
-        db.insert_payment(&payment, PaymentKind::Default)
+        db.insert_payment(&payment)
             .expect("Failed to insert payment");
 
         let payment2 = make_random_payment();
-        db.insert_payment(&payment2, PaymentKind::Default)
+        db.insert_payment(&payment2)
             .expect("Failed to insert payment");
 
         let stats = db

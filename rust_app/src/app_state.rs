@@ -6,12 +6,12 @@ use serde_json::Value;
 
 use crate::{
     PaymentGet,
-    database::{self, PaymentPost, PaymentsDb, Stats},
+    database::{PaymentPost, PaymentsDb, Stats},
 };
 
 struct AppState {
     db: PaymentsDb,
-    sibling_service_url: Option<String>,
+    db_service_url: Option<String>,
 }
 
 #[derive(Clone)]
@@ -30,34 +30,20 @@ pub struct SummaryQuery {
 impl WrappedState {
     pub fn new(
         sender: tokio::sync::mpsc::Sender<PaymentGet>,
-        sibling_service_url: Option<String>,
+        db_service_url: Option<String>,
     ) -> Self {
         WrappedState {
             state: Arc::new(Mutex::new(AppState {
                 db: PaymentsDb::new().expect("Failed to initialize database"),
-                sibling_service_url,
+                db_service_url,
             })),
             client: Client::new(),
             sender,
         }
     }
 
-    pub fn add_payment_cheap(&self, payment: PaymentPost) -> anyhow::Result<()> {
-        return self
-            .state
-            .lock()
-            .unwrap()
-            .db
-            .insert_payment(&payment, database::PaymentKind::Default);
-    }
-
-    pub fn add_payment_fallback(&self, payment: PaymentPost) -> anyhow::Result<()> {
-        return self
-            .state
-            .lock()
-            .unwrap()
-            .db
-            .insert_payment(&payment, database::PaymentKind::Fallback);
+    pub fn add_on_db(&self, payment: PaymentPost) -> anyhow::Result<()> {
+        return self.state.lock().unwrap().db.insert_payment(&payment);
     }
 
     pub fn get_state(&self, query_data: &SummaryQuery) -> anyhow::Result<Stats> {
@@ -67,39 +53,33 @@ impl WrappedState {
         Ok(values)
     }
 
-    pub async fn merge_state_with_sibling(
-        &self,
-        query_data: &SummaryQuery,
-        values: &mut Stats,
-    ) -> anyhow::Result<()> {
-        let sibling_service_url = self.state.lock().unwrap().sibling_service_url.clone();
+    pub async fn send_payment_to_db(&self, payment: &PaymentPost) -> anyhow::Result<()> {
+        let url = self.state.lock().unwrap().db_service_url.clone();
+        let url = url.ok_or_else(|| anyhow::anyhow!("DB service URL is not set"))?;
+        self.client
+            .post(format!("{}/db-save", url))
+            .json(payment)
+            .send()
+            .await?
+            .error_for_status()?;
+        return Ok(());
+    }
 
-        if let Some(url) = sibling_service_url {
-            let client = self.client.clone();
-            let res = client.get(format!("{}/siblings-summary", url));
-
-            let res = if let (Some(from), Some(to)) = (&query_data.from, &query_data.to) {
-                res.query(&[("from", from), ("to", to)])
-            } else {
-                res
-            };
-
-            let res = res.send().await?.error_for_status()?;
-            let json: Value = res.json().await?;
-            // tracing::info!("Received sibling summary: {:?}", json);
-            let def = &json["default"];
-            let def_total = def["totalAmount"].as_f64().unwrap_or(0.0);
-            let def_count = def["totalRequests"].as_u64().unwrap_or(0) as usize;
-            let fallback = &json["fallback"];
-            let fallback_total = fallback["totalAmount"].as_f64().unwrap_or(0.0);
-            let fallback_count = fallback["totalRequests"].as_u64().unwrap_or(0) as usize;
-
-            values.fallback_total += fallback_total;
-            values.fallback_count += fallback_count;
-            values.default_total += def_total;
-            values.default_count += def_count;
-            return Ok(());
-        };
-        return Err(anyhow::anyhow!("Sibling service URL is not set"));
+    pub async fn get_from_db_service(&self, query_data: &SummaryQuery) -> anyhow::Result<Value> {
+        let url = self.state.lock().unwrap().db_service_url.clone();
+        let url = url.ok_or_else(|| anyhow::anyhow!("DB service URL is not set"))?;
+        let response = self
+            .client
+            .get(format!("{}/payments-summary", url))
+            .query(&[
+                ("from", query_data.from.as_ref()),
+                ("to", query_data.to.as_ref()),
+            ])
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(response)
     }
 }
