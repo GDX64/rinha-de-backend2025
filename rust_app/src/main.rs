@@ -17,7 +17,7 @@ mod app_state;
 mod database;
 mod processing;
 
-#[tokio::main]
+#[tokio::main()]
 async fn main() {
     // initialize tracing
     tracing_subscriber::fmt()
@@ -25,6 +25,9 @@ async fn main() {
         .with_ansi(false)
         .pretty()
         .init();
+
+    let workers = tokio::runtime::Handle::current().metrics().num_workers();
+    tracing::info!("Starting application with {} worker threads", workers);
 
     let (sender, receiver) = tokio::sync::mpsc::channel(100_000);
     let db_service_url = std::env::var("DB_URL").ok();
@@ -87,7 +90,9 @@ async fn payments(
     State(state): State<WrappedState>,
     Json(payload): Json<PaymentGet>,
 ) -> StatusCode {
-    state.sender.send(payload).await.unwrap();
+    let Ok(_) = state.sender.try_send(payload) else {
+        return StatusCode::SERVICE_UNAVAILABLE;
+    };
     return StatusCode::CREATED;
 }
 

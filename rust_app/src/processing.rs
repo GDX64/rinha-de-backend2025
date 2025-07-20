@@ -101,9 +101,8 @@ impl RequestWorker {
             let span = tracing::info_span!("payments", correlationId = payload.correlation_id);
             let res = self
                 .try_process_payment(payload.clone())
-                .instrument(span.clone())
+                .instrument(span)
                 .await;
-            let _guard = span.enter();
             let payment = match res {
                 PaymentTryResult::CheapOk(mut payment) => {
                     payment.processed_on = Some(PaymentKind::Default);
