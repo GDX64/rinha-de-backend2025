@@ -9,62 +9,90 @@ use crate::{
 
 struct RequestWorker {
     state: WrappedState,
+    last_default_failure: chrono::DateTime<chrono::Utc>,
+    last_fallback_failure: chrono::DateTime<chrono::Utc>,
 }
 
+const COOL_DOWN_MILLI: i64 = 1_000;
+const TIME_BEFORE_RETRY_MILLI: u64 = 100; // milliseconds
 impl RequestWorker {
     fn new(state: WrappedState) -> Self {
-        RequestWorker { state }
+        RequestWorker {
+            state,
+            last_default_failure: chrono::DateTime::<chrono::Utc>::from_timestamp_millis(0)
+                .unwrap(),
+            last_fallback_failure: chrono::DateTime::<chrono::Utc>::from_timestamp_millis(0)
+                .unwrap(),
+        }
+    }
+
+    fn can_try_on_default(&self) -> bool {
+        let now = chrono::Utc::now();
+        let diff = now - self.last_default_failure;
+        diff.num_milliseconds() > COOL_DOWN_MILLI
+    }
+
+    fn can_try_on_fallback(&self) -> bool {
+        let now = chrono::Utc::now();
+        let diff = now - self.last_fallback_failure;
+        diff.num_milliseconds() > COOL_DOWN_MILLI
     }
 
     async fn try_process_payment(&mut self, payload: PaymentGet) -> PaymentTryResult {
         let payment_post = payload.to_payment_post();
         let mut is_retry = false;
         loop {
-            let res = send_to_service(
-                payment_post.clone(),
-                &default_service_url(),
-                self.state.client.clone(),
-                is_retry,
-            )
-            .await;
+            if self.can_try_on_default() {
+                let res = send_to_service(
+                    payment_post.clone(),
+                    &default_service_url(),
+                    self.state.client.clone(),
+                    is_retry,
+                )
+                .await;
 
-            match res {
-                SendToServiceResult::Ok => {
-                    return PaymentTryResult::CheapOk(payment_post);
-                }
-                SendToServiceResult::AlreadyProcessed => {
-                    // tracing::info!("Payment already processed by cheap service");
-                    return PaymentTryResult::CheapOk(payment_post);
-                }
-                SendToServiceResult::ErrRetry(e) => {
-                    is_retry = true;
-                    tracing::warn!("Retrying payment processing due to error {}", e);
-                }
-            };
+                match res {
+                    SendToServiceResult::Ok => {
+                        return PaymentTryResult::CheapOk(payment_post);
+                    }
+                    SendToServiceResult::AlreadyProcessed => {
+                        // tracing::info!("Payment already processed by cheap service");
+                        return PaymentTryResult::CheapOk(payment_post);
+                    }
+                    SendToServiceResult::ErrRetry(e) => {
+                        is_retry = true;
+                        self.last_default_failure = chrono::Utc::now();
+                        tracing::warn!("Retrying payment processing due to error {}", e);
+                    }
+                };
+            }
 
-            let res = send_to_service(
-                payment_post.clone(),
-                &fallback_service_url(),
-                self.state.client.clone(),
-                is_retry,
-            )
-            .await;
+            if self.can_try_on_fallback() {
+                let res = send_to_service(
+                    payment_post.clone(),
+                    &fallback_service_url(),
+                    self.state.client.clone(),
+                    is_retry,
+                )
+                .await;
 
-            match res {
-                SendToServiceResult::Ok => {
-                    return PaymentTryResult::FallbackOk(payment_post);
-                }
-                SendToServiceResult::AlreadyProcessed => {
-                    // tracing::info!("Payment already processed by fallback service");
-                    return PaymentTryResult::FallbackOk(payment_post);
-                }
-                SendToServiceResult::ErrRetry(e) => {
-                    tracing::warn!("Retrying payment processing due to error {}", e);
-                }
-            };
+                match res {
+                    SendToServiceResult::Ok => {
+                        return PaymentTryResult::FallbackOk(payment_post);
+                    }
+                    SendToServiceResult::AlreadyProcessed => {
+                        // tracing::info!("Payment already processed by fallback service");
+                        return PaymentTryResult::FallbackOk(payment_post);
+                    }
+                    SendToServiceResult::ErrRetry(e) => {
+                        self.last_fallback_failure = chrono::Utc::now();
+                        tracing::warn!("Retrying payment processing due to error {}", e);
+                    }
+                };
+            }
 
             //cooldown before retrying
-            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(TIME_BEFORE_RETRY_MILLI)).await;
         }
     }
 
