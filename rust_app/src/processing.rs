@@ -90,7 +90,7 @@ impl RequestWorker {
             if let Err(e) = result {
                 tracing::error!("Failed to save payment on db: {:?}", e);
             } else {
-                // tracing::info!("Payment processed by cheap service");
+                tracing::info!("Payment saved with success");
             };
         }
     }
