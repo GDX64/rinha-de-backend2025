@@ -21,7 +21,7 @@ mod processing;
 async fn main() {
     // initialize tracing
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
+        .with_max_level(tracing::Level::ERROR)
         .with_ansi(false)
         .pretty()
         .init();

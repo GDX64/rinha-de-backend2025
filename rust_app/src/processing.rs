@@ -1,6 +1,6 @@
 use reqwest::{Client, StatusCode};
 use tokio::select;
-use tracing::{Instrument, instrument};
+use tracing::instrument;
 
 use crate::{
     PaymentGet, WrappedState,
@@ -11,18 +11,30 @@ struct RequestWorker {
     state: WrappedState,
     last_default_failure: chrono::DateTime<chrono::Utc>,
     last_fallback_failure: chrono::DateTime<chrono::Utc>,
+    default_service_url: String,
+    fallback_service_url: String,
 }
 
 const COOL_DOWN_MILLI: i64 = 1_000;
 const TIME_BEFORE_RETRY_MILLI: u64 = 100; // milliseconds
 impl RequestWorker {
     fn new(state: WrappedState) -> Self {
+        fn fallback_service_url() -> String {
+            std::env::var("FALLBACK_PAYMENT")
+                .unwrap_or_else(|_| "http://localhost:8002".to_string())
+        }
+
+        fn default_service_url() -> String {
+            std::env::var("DEFAULT_PAYMENT").unwrap_or_else(|_| "http://localhost:8001".to_string())
+        }
         RequestWorker {
             state,
             last_default_failure: chrono::DateTime::<chrono::Utc>::from_timestamp_millis(0)
                 .unwrap(),
             last_fallback_failure: chrono::DateTime::<chrono::Utc>::from_timestamp_millis(0)
                 .unwrap(),
+            default_service_url: format!("{}/payments", default_service_url()),
+            fallback_service_url: format!("{}/payments", fallback_service_url()),
         }
     }
 
@@ -44,8 +56,8 @@ impl RequestWorker {
         loop {
             if self.can_try_on_default() {
                 let res = send_to_service(
-                    payment_post.clone(),
-                    &default_service_url(),
+                    &payment_post,
+                    &self.default_service_url,
                     self.state.client.clone(),
                     is_retry,
                 )
@@ -62,15 +74,15 @@ impl RequestWorker {
                     SendToServiceResult::ErrRetry(e) => {
                         is_retry = true;
                         self.last_default_failure = chrono::Utc::now();
-                        tracing::warn!("Retrying payment processing due to error {}", e);
+                        // tracing::warn!("Retrying payment processing due to error {}", e);
                     }
                 };
             }
 
             if self.can_try_on_fallback() {
                 let res = send_to_service(
-                    payment_post.clone(),
-                    &fallback_service_url(),
+                    &payment_post,
+                    &self.fallback_service_url,
                     self.state.client.clone(),
                     is_retry,
                 )
@@ -86,7 +98,7 @@ impl RequestWorker {
                     }
                     SendToServiceResult::ErrRetry(e) => {
                         self.last_fallback_failure = chrono::Utc::now();
-                        tracing::warn!("Retrying payment processing due to error {}", e);
+                        // tracing::warn!("Retrying payment processing due to error {}", e);
                     }
                 };
             }
@@ -98,11 +110,7 @@ impl RequestWorker {
 
     async fn payment_loop(mut self, mut recv: tokio::sync::mpsc::Receiver<PaymentGet>) {
         while let Some(payload) = recv.recv().await {
-            let span = tracing::info_span!("payments", correlationId = payload.correlation_id);
-            let res = self
-                .try_process_payment(payload.clone())
-                .instrument(span)
-                .await;
+            let res = self.try_process_payment(payload).await;
             let payment = match res {
                 PaymentTryResult::CheapOk(mut payment) => {
                     payment.processed_on = Some(PaymentKind::Default);
@@ -154,17 +162,9 @@ pub enum SendToServiceResult {
     ErrRetry(anyhow::Error),
 }
 
-fn fallback_service_url() -> String {
-    std::env::var("FALLBACK_PAYMENT").unwrap_or_else(|_| "http://localhost:8002".to_string())
-}
-
-fn default_service_url() -> String {
-    std::env::var("DEFAULT_PAYMENT").unwrap_or_else(|_| "http://localhost:8001".to_string())
-}
-
 #[instrument(skip(payload, client))]
 async fn send_to_service(
-    payload: PaymentPost,
+    payload: &PaymentPost,
     url: &str,
     client: reqwest::Client,
     is_retry: bool,
@@ -178,8 +178,7 @@ async fn send_to_service(
         }
     };
 
-    let post_url = format!("{}/payments", url);
-    let res = client.post(post_url).json(&payload).send();
+    let res = client.post(url).json(&payload).send();
     let timeout = tokio::time::sleep(std::time::Duration::from_millis(1_000));
     let res = select! {
         res = res => res,
