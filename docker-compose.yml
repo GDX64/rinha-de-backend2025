@@ -1,22 +1,20 @@
 services:
-  nginx:
-    image: nginx:1.25-alpine
-    container_name: rinha-nginx
+  haproxy:
+    networks:
+      - backend
+    image: haproxy:3.2.3-alpine3.22
     volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
     depends_on:
       - api1
       - api2
     ports:
       - "9999:9999"
-    networks:
-      - backend
-      - payment-processor
     deploy:
       resources:
         limits:
-          cpus: "0.20"
-          memory: "20MB"
+          cpus: "0.3"
+          memory: "50MB"
 
   api1: &api
     build:
@@ -33,16 +31,16 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.50"
-          memory: "30MB"
+          cpus: "0.40"
+          memory: "50MB"
   api2:
     <<: *api
     hostname: api2
     deploy:
       resources:
         limits:
-          cpus: "0.50"
-          memory: "30MB"
+          cpus: "0.40"
+          memory: "50MB"
   db-api:
     <<: *api
     hostname: db-api
@@ -51,7 +49,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.30"
+          cpus: "0.40"
           memory: "50MB"
 
 networks:
