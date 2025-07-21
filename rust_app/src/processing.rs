@@ -121,10 +121,13 @@ impl RequestWorker {
                     payment
                 }
             };
-            let result = self.state.send_payment_to_db(&payment).await;
-            if let Err(e) = result {
-                tracing::error!("Failed to save payment on db: {:?}", e);
-            }
+            let state = self.state.clone();
+            tokio::spawn(async move {
+                let result = state.send_payment_to_db(&payment).await;
+                if let Err(e) = result {
+                    tracing::error!("Failed to save payment on db: {:?}", e);
+                }
+            });
         }
     }
 }
