@@ -16,7 +16,8 @@ struct RequestWorker {
 }
 
 const COOL_DOWN_MILLI: i64 = 1_000;
-const TIME_BEFORE_RETRY_MILLI: u64 = 100; // milliseconds
+const TIME_BEFORE_RETRY_MILLI: u64 = 100;
+
 impl RequestWorker {
     fn new(state: WrappedState) -> Self {
         fn fallback_service_url() -> String {

@@ -1,0 +1,9 @@
+{
+  "name": "Gabriel Machado",
+  "social": ["https://www.linkedin.com/in/gabriel-e-l-machado/"],
+  "source-code-repo": "",
+  "langs": ["rust"],
+  "storages": ["sqlite"],
+  "messaging": [""],
+  "load-balancers": ["haproxy"]
+}
