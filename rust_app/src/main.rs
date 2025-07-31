@@ -40,7 +40,7 @@ async fn main() {
         .route("/db-save", post(db_save))
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:9999").await.unwrap();
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
 

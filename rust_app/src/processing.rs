@@ -16,7 +16,7 @@ struct RequestWorker {
 }
 
 const COOL_DOWN_MILLI: i64 = 1_000;
-const TIME_BEFORE_RETRY_MILLI: u64 = 100;
+const TIME_BEFORE_RETRY_MILLI: u64 = 500;
 
 impl RequestWorker {
     fn new(state: WrappedState) -> Self {
