@@ -1,8 +1,7 @@
-use axum::extract::connect_info::Connected;
 use std::env;
+use std::net::ToSocketAddrs;
 use tokio::io::{self};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::select;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
@@ -11,16 +10,11 @@ async fn main() -> io::Result<()> {
     let target_addrs = env::var("TARGET_ADDRS").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
     let target_addrs = target_addrs
         .split(',')
-        .map(|s| s.to_string())
-        .collect::<Vec<String>>();
+        .flat_map(|s| s.to_socket_addrs().unwrap())
+        .collect::<Vec<_>>();
 
     let listener = TcpListener::bind(&listen_addr).await?;
-    println!("Listening on {}", listen_addr);
     let mut last_chosen: usize = 0;
-
-    // let many = (0..600).map(|_|{
-
-    // })
 
     loop {
         let (mut inbound, _) = listener.accept().await?;
@@ -36,15 +30,7 @@ async fn main() -> io::Result<()> {
                     return ();
                 }
             };
-            let (mut ir, mut iw) = inbound.split();
-            let (mut or, mut ow) = outbound.split();
-            let inbound_to_outbound = tokio::io::copy(&mut ir, &mut ow);
-            let outbound_to_inbound = tokio::io::copy(&mut or, &mut iw);
-            select! {
-                _ = inbound_to_outbound => {}
-                _ = outbound_to_inbound => {}
-            }
-            println!("Connection closed");
+            let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
         });
     }
 }
