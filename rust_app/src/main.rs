@@ -6,7 +6,7 @@ use crate::{
 use axum::{
     Json, Router, debug_handler,
     extract::{Query, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
@@ -29,9 +29,25 @@ async fn main() {
     let workers = tokio::runtime::Handle::current().metrics().num_workers();
     tracing::info!("Starting application with {} worker threads", workers);
 
+    let (db_sender, mut db_receiver) = tokio::sync::mpsc::channel::<PaymentPost>(100_000);
     let (sender, receiver) = tokio::sync::mpsc::channel(100_000);
+
     let db_service_url = std::env::var("DB_URL").ok();
-    let state = WrappedState::new(sender, db_service_url);
+    if !is_db_service() {
+        if let Some(url) = db_service_url {
+            let url = format!("{}/db-save", url);
+            tokio::spawn(async move {
+                let client = reqwest::Client::new();
+                while let Some(payment) = db_receiver.recv().await {
+                    if let Err(e) = WrappedState::send_payment_to_db(&payment, &url, &client).await
+                    {
+                        tracing::error!("Failed to send payment to DB: {:?}", e);
+                    }
+                }
+            });
+        }
+    }
+    let state = WrappedState::new(sender, is_db_service(), db_sender);
     create_worker(receiver, state.clone());
 
     let app = Router::new()
@@ -76,7 +92,8 @@ async fn summary(
         return (StatusCode::OK, Json(json));
     } else {
         tracing::info!("Getting summary from DB service");
-        let value = state.get_from_db_service(&query_data).await;
+        let db_url = std::env::var("DB_URL").expect("DB_URL environment variable is not set");
+        let value = state.get_from_db_service(&query_data, &db_url).await;
         let Ok(value) = value else {
             tracing::error!("Failed to get summary from DB service: {:?}", value.err());
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(Value::Null));

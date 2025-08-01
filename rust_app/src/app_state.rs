@@ -11,14 +11,14 @@ use crate::{
 
 struct AppState {
     db: PaymentsDb,
-    db_service_url: Option<String>,
 }
 
 #[derive(Clone)]
 pub struct WrappedState {
-    state: Arc<Mutex<AppState>>,
+    state: Option<Arc<Mutex<AppState>>>,
     pub client: Client,
     pub sender: tokio::sync::mpsc::Sender<PaymentGet>,
+    pub db_sender: tokio::sync::mpsc::Sender<PaymentPost>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -30,34 +30,57 @@ pub struct SummaryQuery {
 impl WrappedState {
     pub fn new(
         sender: tokio::sync::mpsc::Sender<PaymentGet>,
-        db_service_url: Option<String>,
+        is_db_service: bool,
+        db_sender: tokio::sync::mpsc::Sender<PaymentPost>,
     ) -> Self {
-        WrappedState {
-            state: Arc::new(Mutex::new(AppState {
-                db: PaymentsDb::new().expect("Failed to initialize database"),
-                db_service_url,
-            })),
-            client: Client::new(),
-            sender,
+        if is_db_service {
+            WrappedState {
+                state: Some(Arc::new(Mutex::new(AppState {
+                    db: PaymentsDb::new().expect("Failed to initialize database"),
+                }))),
+                client: Client::new(),
+                sender,
+                db_sender,
+            }
+        } else {
+            WrappedState {
+                state: None,
+                client: Client::new(),
+                sender,
+                db_sender,
+            }
         }
     }
 
+    fn with_state<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&AppState) -> R,
+    {
+        let state = self.state.as_ref().expect("State is not initialized");
+        let state = state.lock().unwrap();
+        f(&state)
+    }
+
     pub fn add_on_db(&self, payment: PaymentPost) -> anyhow::Result<()> {
-        return self.state.lock().unwrap().db.insert_payment(&payment);
+        return self.with_state(|state| {
+            return state.db.insert_payment(&payment);
+        });
     }
 
     pub fn get_state(&self, query_data: &SummaryQuery) -> anyhow::Result<Stats> {
         let start = query_data.from.as_ref().map(|s| s.as_str());
         let end = query_data.to.as_ref().map(|s| s.as_str());
-        let values = self.state.lock().unwrap().db.get_stats(start, end)?;
+        let values = self.with_state(|state| state.db.get_stats(start, end))?;
         Ok(values)
     }
 
-    pub async fn send_payment_to_db(&self, payment: &PaymentPost) -> anyhow::Result<()> {
-        let url = self.state.lock().unwrap().db_service_url.clone();
-        let url = url.ok_or_else(|| anyhow::anyhow!("DB service URL is not set"))?;
-        self.client
-            .post(format!("{}/db-save", url))
+    pub async fn send_payment_to_db(
+        payment: &PaymentPost,
+        url: &str,
+        client: &Client,
+    ) -> anyhow::Result<()> {
+        client
+            .post(url)
             .json(payment)
             .send()
             .await?
@@ -65,9 +88,11 @@ impl WrappedState {
         return Ok(());
     }
 
-    pub async fn get_from_db_service(&self, query_data: &SummaryQuery) -> anyhow::Result<Value> {
-        let url = self.state.lock().unwrap().db_service_url.clone();
-        let url = url.ok_or_else(|| anyhow::anyhow!("DB service URL is not set"))?;
+    pub async fn get_from_db_service(
+        &self,
+        query_data: &SummaryQuery,
+        url: &str,
+    ) -> anyhow::Result<Value> {
         let response = self
             .client
             .get(format!("{}/payments-summary", url))
