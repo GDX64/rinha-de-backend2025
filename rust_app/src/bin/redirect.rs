@@ -1,6 +1,8 @@
+use axum::extract::connect_info::Connected;
 use std::env;
-use tokio::io;
+use tokio::io::{self};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::select;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
@@ -15,20 +17,34 @@ async fn main() -> io::Result<()> {
     let listener = TcpListener::bind(&listen_addr).await?;
     println!("Listening on {}", listen_addr);
     let mut last_chosen: usize = 0;
+
+    // let many = (0..600).map(|_|{
+
+    // })
+
     loop {
         let (mut inbound, _) = listener.accept().await?;
         let target_addr = target_addrs[last_chosen].clone();
         last_chosen = (last_chosen + 1) % target_addrs.len();
 
         tokio::spawn(async move {
-            match TcpStream::connect(target_addr).await {
-                Ok(mut outbound) => {
-                    let _ = io::copy_bidirectional(&mut inbound, &mut outbound).await;
-                }
+            let connection = TcpStream::connect(target_addr).await;
+            let mut outbound = match connection {
+                Ok(outbound) => outbound,
                 Err(e) => {
                     eprintln!("Failed to connect to target: {}", e);
+                    return ();
                 }
+            };
+            let (mut ir, mut iw) = inbound.split();
+            let (mut or, mut ow) = outbound.split();
+            let inbound_to_outbound = tokio::io::copy(&mut ir, &mut ow);
+            let outbound_to_inbound = tokio::io::copy(&mut or, &mut iw);
+            select! {
+                _ = inbound_to_outbound => {}
+                _ = outbound_to_inbound => {}
             }
+            println!("Connection closed");
         });
     }
 }
