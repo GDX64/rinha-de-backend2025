@@ -17,7 +17,7 @@ mod app_state;
 mod database;
 mod processing;
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main()]
 async fn main() {
     // initialize tracing
     tracing_subscriber::fmt()
@@ -62,7 +62,6 @@ async fn summary(
     Query(query_data): Query<SummaryQuery>,
 ) -> (StatusCode, Json<Value>) {
     if is_db_service() {
-        tracing::info!("Getting summary from local DB");
         let stats = state.get_state(&query_data);
         let Ok(stats) = stats else {
             tracing::error!("Failed to get stats: {:?}", stats.err());
@@ -72,7 +71,6 @@ async fn summary(
         let json = stats.to_json();
         return (StatusCode::OK, Json(json));
     } else {
-        tracing::info!("Getting summary from DB service");
         let db_url = std::env::var("DB_URL").expect("DB_URL environment variable is not set");
         let value = state.get_from_db_service(&query_data, &db_url).await;
         let Ok(value) = value else {

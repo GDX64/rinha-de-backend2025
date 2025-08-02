@@ -1,3 +1,5 @@
+use std::thread::JoinHandle;
+
 use reqwest::{Client, StatusCode};
 use tokio::select;
 use tracing::instrument;
@@ -75,13 +77,11 @@ impl RequestWorker {
                         return PaymentTryResult::CheapOk(payment_post);
                     }
                     SendToServiceResult::AlreadyProcessed => {
-                        // tracing::info!("Payment already processed by cheap service");
                         return PaymentTryResult::CheapOk(payment_post);
                     }
                     SendToServiceResult::ErrRetry(e) => {
                         is_retry = true;
                         self.last_default_failure = chrono::Utc::now();
-                        // tracing::warn!("Retrying payment processing due to error {}", e);
                     }
                 };
             }
@@ -100,12 +100,10 @@ impl RequestWorker {
                         return PaymentTryResult::FallbackOk(payment_post);
                     }
                     SendToServiceResult::AlreadyProcessed => {
-                        // tracing::info!("Payment already processed by fallback service");
                         return PaymentTryResult::FallbackOk(payment_post);
                     }
                     SendToServiceResult::ErrRetry(e) => {
                         self.last_fallback_failure = chrono::Utc::now();
-                        // tracing::warn!("Retrying payment processing due to error {}", e);
                     }
                 };
             }
@@ -140,9 +138,21 @@ impl RequestWorker {
     }
 }
 
-pub fn create_worker(receiver: tokio::sync::mpsc::Receiver<PaymentGet>, state: WrappedState) {
-    let worker = RequestWorker::new(state);
-    tokio::spawn(worker.payment_loop(receiver));
+pub fn create_worker(
+    receiver: tokio::sync::mpsc::Receiver<PaymentGet>,
+    state: WrappedState,
+) -> JoinHandle<()> {
+    let handle = std::thread::spawn(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create tokio runtime");
+        rt.block_on(async move {
+            let worker = RequestWorker::new(state);
+            worker.payment_loop(receiver).await;
+        })
+    });
+    return handle;
 }
 
 enum PaymentTryResult {
@@ -202,7 +212,6 @@ async fn send_to_service(
     let res = res.and_then(|res| res.error_for_status());
     match res {
         Ok(_res) => {
-            // tracing::info!("payment service success");
             return SendToServiceResult::Ok;
         }
         Err(err) => {
