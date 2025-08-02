@@ -18,7 +18,6 @@ pub struct WrappedState {
     state: Option<Arc<Mutex<AppState>>>,
     pub client: Client,
     pub sender: tokio::sync::mpsc::Sender<PaymentGet>,
-    pub db_sender: tokio::sync::mpsc::Sender<PaymentPost>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -28,11 +27,7 @@ pub struct SummaryQuery {
 }
 
 impl WrappedState {
-    pub fn new(
-        sender: tokio::sync::mpsc::Sender<PaymentGet>,
-        is_db_service: bool,
-        db_sender: tokio::sync::mpsc::Sender<PaymentPost>,
-    ) -> Self {
+    pub fn new(sender: tokio::sync::mpsc::Sender<PaymentGet>, is_db_service: bool) -> Self {
         if is_db_service {
             WrappedState {
                 state: Some(Arc::new(Mutex::new(AppState {
@@ -40,14 +35,12 @@ impl WrappedState {
                 }))),
                 client: Client::new(),
                 sender,
-                db_sender,
             }
         } else {
             WrappedState {
                 state: None,
                 client: Client::new(),
                 sender,
-                db_sender,
             }
         }
     }
@@ -74,12 +67,8 @@ impl WrappedState {
         Ok(values)
     }
 
-    pub async fn send_payment_to_db(
-        payment: &PaymentPost,
-        url: &str,
-        client: &Client,
-    ) -> anyhow::Result<()> {
-        client
+    pub async fn send_payment_to_db(&self, payment: &PaymentPost, url: &str) -> anyhow::Result<()> {
+        self.client
             .post(url)
             .json(payment)
             .send()

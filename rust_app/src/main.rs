@@ -17,7 +17,7 @@ mod app_state;
 mod database;
 mod processing;
 
-#[tokio::main()]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     // initialize tracing
     tracing_subscriber::fmt()
@@ -26,29 +26,12 @@ async fn main() {
         .pretty()
         .init();
 
-    let workers = tokio::runtime::Handle::current().metrics().num_workers();
-    tracing::info!("Starting application with {} worker threads", workers);
-
-    let (db_sender, mut db_receiver) = tokio::sync::mpsc::channel::<PaymentPost>(100_000);
     let (sender, receiver) = tokio::sync::mpsc::channel(100_000);
+    let state = WrappedState::new(sender, is_db_service());
 
-    let db_service_url = std::env::var("DB_URL").ok();
     if !is_db_service() {
-        if let Some(url) = db_service_url {
-            let url = format!("{}/db-save", url);
-            tokio::spawn(async move {
-                let client = reqwest::Client::new();
-                while let Some(payment) = db_receiver.recv().await {
-                    if let Err(e) = WrappedState::send_payment_to_db(&payment, &url, &client).await
-                    {
-                        tracing::error!("Failed to send payment to DB: {:?}", e);
-                    }
-                }
-            });
-        }
+        create_worker(receiver, state.clone());
     }
-    let state = WrappedState::new(sender, is_db_service(), db_sender);
-    create_worker(receiver, state.clone());
 
     let app = Router::new()
         .route("/payments-summary", get(summary))
@@ -64,8 +47,6 @@ async fn db_save(
     State(state): State<WrappedState>,
     Json(payload): Json<PaymentPost>,
 ) -> StatusCode {
-    let span = tracing::info_span!("db_save", correlationId = payload.correlation_id);
-    let _guard = span.enter();
     match state.add_on_db(payload) {
         Ok(_) => StatusCode::CREATED,
         Err(e) => {
