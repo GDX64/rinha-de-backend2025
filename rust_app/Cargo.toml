@@ -5,13 +5,18 @@ version = "0.1.0"
 
 [dependencies]
 anyhow = "1.0.98"
-axum = {version = "0.8.4", features = ["macros"]}
+axum = {version = "0.8.4", features = ["macros", "http2", "ws"]}
+bincode = {version = "2.0.1", features = ["serde"]}
 chrono = "0.4.41"
 fastrand = "2.3.0"
 reqwest = {version = "0.12.22", features = ["json"]}
+reqwest-websocket = "0.5.0"
 rusqlite = {version = "0.37", features = ["bundled"]}
 serde = {version = "1.0.219", features = ["derive"]}
 serde_json = {version = "1.0.140"}
 tokio = {version = "1.46.1", features = ["full"]}
 tracing = {version = "0.1.41", features = ["attributes"]}
 tracing-subscriber = "0.3.19"
+
+# [profile.release]
+# debug = true

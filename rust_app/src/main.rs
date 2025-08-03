@@ -4,7 +4,9 @@ use crate::{
     processing::create_worker,
 };
 use axum::{
-    Json, Router, debug_handler,
+    Json, Router,
+    body::Bytes,
+    debug_handler,
     extract::{Query, State},
     http::StatusCode,
     routing::{get, post},
@@ -37,10 +39,18 @@ async fn main() {
         .route("/payments-summary", get(summary))
         .route("/payments", post(payments))
         .route("/db-save", post(db_save))
+        .route("/ws", get(websocket_handler))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            tokio::signal::ctrl_c()
+                .await
+                .expect("Failed to listen for shutdown signal");
+        })
+        .await
+        .unwrap();
 }
 
 async fn db_save(
@@ -54,6 +64,15 @@ async fn db_save(
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
+}
+
+async fn websocket_handler(
+    State(state): State<WrappedState>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> axum::response::Response {
+    return ws.on_upgrade(move |socket| {
+        return state.on_websocket(socket);
+    });
 }
 
 #[instrument(skip(state))]
@@ -82,11 +101,8 @@ async fn summary(
 }
 
 #[debug_handler]
-async fn payments(
-    State(state): State<WrappedState>,
-    Json(payload): Json<PaymentGet>,
-) -> StatusCode {
-    let Ok(_) = state.sender.try_send(payload) else {
+async fn payments(State(state): State<WrappedState>, bytes: Bytes) -> StatusCode {
+    let Ok(_) = state.sender.try_send(bytes) else {
         return StatusCode::SERVICE_UNAVAILABLE;
     };
     return StatusCode::CREATED;

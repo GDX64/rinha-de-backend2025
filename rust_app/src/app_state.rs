@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 
+use axum::body::Bytes;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -13,11 +14,13 @@ struct AppState {
     db: PaymentsDb,
 }
 
+pub type PaymentSenderChannel = tokio::sync::mpsc::Sender<Bytes>;
+
 #[derive(Clone)]
 pub struct WrappedState {
     state: Option<Arc<Mutex<AppState>>>,
     pub client: Client,
-    pub sender: tokio::sync::mpsc::Sender<PaymentGet>,
+    pub sender: PaymentSenderChannel,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -27,7 +30,7 @@ pub struct SummaryQuery {
 }
 
 impl WrappedState {
-    pub fn new(sender: tokio::sync::mpsc::Sender<PaymentGet>, is_db_service: bool) -> Self {
+    pub fn new(sender: PaymentSenderChannel, is_db_service: bool) -> Self {
         if is_db_service {
             WrappedState {
                 state: Some(Arc::new(Mutex::new(AppState {
@@ -95,5 +98,45 @@ impl WrappedState {
             .json::<Value>()
             .await?;
         Ok(response)
+    }
+
+    fn on_payment_bytes(&self, bytes: Bytes) {
+        self.sender
+            .try_send(bytes)
+            .expect("Failed to send payment bytes");
+    }
+
+    pub async fn on_websocket(self, mut socket: axum::extract::ws::WebSocket) {
+        let res = tokio::spawn(async move {
+            while let Some(Ok(msg)) = socket.recv().await {
+                let data = msg.into_data();
+                let ws_message = WebsocketMessage::from_bytes(data);
+                match ws_message {
+                    WebsocketMessage::Payment(bytes) => self.on_payment_bytes(bytes.into()),
+                    WebsocketMessage::None => {}
+                }
+            }
+        })
+        .await;
+        if let Err(e) = res {
+            tracing::error!("WebSocket handler failed: {:?}", e);
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub enum WebsocketMessage {
+    Payment(Vec<u8>),
+    None,
+}
+
+impl WebsocketMessage {
+    pub fn from_bytes(bytes: Bytes) -> Self {
+        let Ok((me, _)) = bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
+        else {
+            tracing::error!("Failed to decode bytes");
+            return WebsocketMessage::None;
+        };
+        return me;
     }
 }

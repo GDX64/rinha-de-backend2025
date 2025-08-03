@@ -1,5 +1,6 @@
 use std::thread::JoinHandle;
 
+use axum::body::Bytes;
 use reqwest::{Client, StatusCode};
 use tokio::select;
 use tracing::instrument;
@@ -15,7 +16,7 @@ struct RequestWorker {
     last_fallback_failure: chrono::DateTime<chrono::Utc>,
     default_service_url: String,
     fallback_service_url: String,
-    db_url: String,
+    db_url: Option<String>,
 }
 
 const COOL_DOWN_MILLI: i64 = 1_000;
@@ -32,9 +33,9 @@ impl RequestWorker {
             std::env::var("DEFAULT_PAYMENT").unwrap_or_else(|_| "http://localhost:8001".to_string())
         }
 
-        let db_service_url =
-            std::env::var("DB_URL").expect("DB_URL environment variable is not set");
-        let db_service_url = format!("{}/db-save", db_service_url);
+        let db_service_url = std::env::var("DB_URL").ok().map(|url| {
+            return format!("{}/db-save", url);
+        });
         RequestWorker {
             state,
             last_default_failure: chrono::DateTime::<chrono::Utc>::from_timestamp_millis(0)
@@ -113,8 +114,13 @@ impl RequestWorker {
         }
     }
 
-    async fn payment_loop(mut self, mut recv: tokio::sync::mpsc::Receiver<PaymentGet>) {
+    async fn payment_loop(mut self, mut recv: tokio::sync::mpsc::Receiver<Bytes>) {
         while let Some(payload) = recv.recv().await {
+            let payload = serde_json::from_slice::<PaymentGet>(&payload);
+            let Ok(payload) = payload else {
+                tracing::error!("Failed to deserialize payment: {:?}", payload.err());
+                continue;
+            };
             let res = self.try_process_payment(payload).await;
             let payment = match res {
                 PaymentTryResult::CheapOk(mut payment) => {
@@ -126,20 +132,18 @@ impl RequestWorker {
                     payment
                 }
             };
-            self.state
-                .send_payment_to_db(&payment, &self.db_url)
-                .await
-                .expect("Failed to send payment to DB");
-            // state
-            //     .db_sender
-            //     .try_send(payment)
-            //     .expect("Failed to send payment to DB channel");
+            if let Some(db_url) = &self.db_url {
+                self.state
+                    .send_payment_to_db(&payment, &db_url)
+                    .await
+                    .expect("Failed to send payment to DB");
+            }
         }
     }
 }
 
 pub fn create_worker(
-    receiver: tokio::sync::mpsc::Receiver<PaymentGet>,
+    receiver: tokio::sync::mpsc::Receiver<Bytes>,
     state: WrappedState,
 ) -> JoinHandle<()> {
     let handle = std::thread::spawn(|| {
