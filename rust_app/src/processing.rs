@@ -16,7 +16,6 @@ struct RequestWorker {
     last_fallback_failure: chrono::DateTime<chrono::Utc>,
     default_service_url: String,
     fallback_service_url: String,
-    db_url: Option<String>,
 }
 
 const COOL_DOWN_MILLI: i64 = 1_000;
@@ -33,9 +32,6 @@ impl RequestWorker {
             std::env::var("DEFAULT_PAYMENT").unwrap_or_else(|_| "http://localhost:8001".to_string())
         }
 
-        let db_service_url = std::env::var("DB_URL").ok().map(|url| {
-            return format!("http://{}/db-save", url);
-        });
         RequestWorker {
             state,
             last_default_failure: chrono::DateTime::<chrono::Utc>::from_timestamp_millis(0)
@@ -44,7 +40,6 @@ impl RequestWorker {
                 .unwrap(),
             default_service_url: format!("{}/payments", default_service_url()),
             fallback_service_url: format!("{}/payments", fallback_service_url()),
-            db_url: db_service_url,
         }
     }
 
@@ -132,12 +127,9 @@ impl RequestWorker {
                     payment
                 }
             };
-            if let Some(db_url) = &self.db_url {
-                self.state
-                    .send_payment_to_db(&payment, &db_url)
-                    .await
-                    .expect("Failed to send payment to DB");
-            }
+            self.state
+                .add_on_db(payment)
+                .expect("Failed to send payment to DB");
         }
     }
 }

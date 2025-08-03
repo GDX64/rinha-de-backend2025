@@ -97,16 +97,6 @@ impl WrappedState {
         Ok(values)
     }
 
-    pub async fn send_payment_to_db(&self, payment: &PaymentPost, url: &str) -> anyhow::Result<()> {
-        self.client
-            .post(url)
-            .json(payment)
-            .send()
-            .await?
-            .error_for_status()?;
-        return Ok(());
-    }
-
     pub async fn get_from_db_service(
         &self,
         query_data: &SummaryQuery,

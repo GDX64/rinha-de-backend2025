@@ -14,7 +14,7 @@ services:
     deploy:
       resources:
         limits:
-          # cpus: "0.2"
+          cpus: "0.3"
           memory: "50MB"
 
   api1: &api
@@ -32,7 +32,7 @@ services:
     deploy:
       resources:
         limits:
-          # cpus: "0.60"
+          cpus: "0.5"
           memory: "50MB"
 
   api2:
@@ -43,7 +43,7 @@ services:
     deploy:
       resources:
         limits:
-          # cpus: "0.6"
+          cpus: "0.5"
           memory: "50MB"
   
   redirect:
@@ -64,7 +64,7 @@ services:
     deploy:
       resources:
           limits:
-            # cpus: "0.1"
+            cpus: "0.2"
             memory: "50MB"
 
 networks:
