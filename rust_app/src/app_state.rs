@@ -1,13 +1,13 @@
-use std::sync::{Arc, Mutex};
-
 use axum::body::Bytes;
+use futures_util::SinkExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::{Arc, Mutex};
 
 use crate::{
-    PaymentGet,
     database::{PaymentPost, PaymentsDb, Stats},
+    processing::create_worker,
 };
 
 struct AppState {
@@ -16,11 +16,14 @@ struct AppState {
 
 pub type PaymentSenderChannel = tokio::sync::mpsc::Sender<Bytes>;
 
+pub type WsChannel = tokio::sync::mpsc::Sender<Bytes>;
+
 #[derive(Clone)]
 pub struct WrappedState {
     state: Option<Arc<Mutex<AppState>>>,
     pub client: Client,
     pub sender: PaymentSenderChannel,
+    pub ws: WsChannel,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -30,22 +33,46 @@ pub struct SummaryQuery {
 }
 
 impl WrappedState {
-    pub fn new(sender: PaymentSenderChannel, is_db_service: bool) -> Self {
-        if is_db_service {
-            WrappedState {
+    pub async fn new(is_db_service: bool) -> anyhow::Result<Self> {
+        let (ws_sender, mut ws_receiver) = tokio::sync::mpsc::channel(100_000);
+        let (sender, receiver) = tokio::sync::mpsc::channel(100_000);
+
+        let state = if is_db_service {
+            let state = WrappedState {
                 state: Some(Arc::new(Mutex::new(AppState {
                     db: PaymentsDb::new().expect("Failed to initialize database"),
                 }))),
                 client: Client::new(),
                 sender,
-            }
+                ws: ws_sender,
+            };
+            create_worker(receiver, state.clone());
+            state
         } else {
+            let db_url = std::env::var("DB_URL")?;
+            let db_url = format!("ws://{db_url}/ws");
+            println!("Connecting to WebSocket at: {}", db_url);
+            let mut websocket = reqwest_websocket::websocket(db_url).await?;
+
+            tokio::spawn(async move {
+                while let Some(msg) = ws_receiver.recv().await {
+                    let msg = WebsocketMessage::Payment(msg.to_vec());
+                    let bin_message = reqwest_websocket::Message::Binary(msg.to_bytes());
+                    websocket
+                        .send(bin_message)
+                        .await
+                        .expect("Failed to send WebSocket message");
+                }
+            });
+
             WrappedState {
                 state: None,
                 client: Client::new(),
                 sender,
+                ws: ws_sender,
             }
-        }
+        };
+        Ok(state)
     }
 
     fn with_state<F, R>(&self, f: F) -> R
@@ -87,7 +114,7 @@ impl WrappedState {
     ) -> anyhow::Result<Value> {
         let response = self
             .client
-            .get(format!("{}/payments-summary", url))
+            .get(format!("http://{}/payments-summary", url))
             .query(&[
                 ("from", query_data.from.as_ref()),
                 ("to", query_data.to.as_ref()),
@@ -138,5 +165,13 @@ impl WebsocketMessage {
             return WebsocketMessage::None;
         };
         return me;
+    }
+
+    pub fn to_bytes(&self) -> Bytes {
+        let Ok(bytes) = bincode::serde::encode_to_vec(self, bincode::config::standard()) else {
+            tracing::error!("Failed to encode WebSocket message");
+            return Bytes::new();
+        };
+        return Bytes::from(bytes);
     }
 }

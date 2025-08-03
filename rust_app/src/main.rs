@@ -1,7 +1,6 @@
 use crate::{
     app_state::{SummaryQuery, WrappedState},
     database::PaymentPost,
-    processing::create_worker,
 };
 use axum::{
     Json, Router,
@@ -9,7 +8,7 @@ use axum::{
     debug_handler,
     extract::{Query, State},
     http::StatusCode,
-    routing::{get, post},
+    routing::{any, get, post},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -28,18 +27,15 @@ async fn main() {
         .pretty()
         .init();
 
-    let (sender, receiver) = tokio::sync::mpsc::channel(100_000);
-    let state = WrappedState::new(sender, is_db_service());
-
-    if !is_db_service() {
-        create_worker(receiver, state.clone());
-    }
+    let state = WrappedState::new(is_db_service())
+        .await
+        .expect("Failed to create WrappedState");
 
     let app = Router::new()
         .route("/payments-summary", get(summary))
         .route("/payments", post(payments))
         .route("/db-save", post(db_save))
-        .route("/ws", get(websocket_handler))
+        .route("/ws", any(websocket_handler))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
@@ -70,6 +66,7 @@ async fn websocket_handler(
     State(state): State<WrappedState>,
     ws: axum::extract::ws::WebSocketUpgrade,
 ) -> axum::response::Response {
+    println!("WebSocket connection requested");
     return ws.on_upgrade(move |socket| {
         return state.on_websocket(socket);
     });
@@ -102,7 +99,7 @@ async fn summary(
 
 #[debug_handler]
 async fn payments(State(state): State<WrappedState>, bytes: Bytes) -> StatusCode {
-    let Ok(_) = state.sender.try_send(bytes) else {
+    let Ok(_) = state.ws.try_send(bytes) else {
         return StatusCode::SERVICE_UNAVAILABLE;
     };
     return StatusCode::CREATED;

@@ -1,4 +1,21 @@
 services:
+  db-api:
+    build:
+      context: .
+      dockerfile: dockerfile
+    hostname: db-api
+    environment:
+      - IS_DB_SERVICE=true
+      - DEFAULT_PAYMENT=http://payment-processor-default:8080
+      - FALLBACK_PAYMENT=http://payment-processor-fallback:8080
+    networks:
+      - backend
+      - payment-processor
+    deploy:
+      resources:
+        limits:
+          # cpus: "0.2"
+          memory: "50MB"
 
   api1: &api
     build:
@@ -6,35 +23,29 @@ services:
       dockerfile: dockerfile
     hostname: api1
     environment:
-      - DEFAULT_PAYMENT=http://payment-processor-default:8080
-      - FALLBACK_PAYMENT=http://payment-processor-fallback:8080
-      - DB_URL=http://db-api:8080
+      - DB_URL=db-api:8080
     networks:
       - backend
       - payment-processor
+    depends_on:
+      - db-api
     deploy:
       resources:
         limits:
-          cpus: "0.60"
+          # cpus: "0.60"
           memory: "50MB"
+
   api2:
     <<: *api
     hostname: api2
+    depends_on:
+      - db-api
     deploy:
       resources:
         limits:
-          cpus: "0.6"
+          # cpus: "0.6"
           memory: "50MB"
-  db-api:
-    <<: *api
-    hostname: db-api
-    environment:
-      - IS_DB_SERVICE=true
-    deploy:
-      resources:
-        limits:
-          cpus: "0.2"
-          memory: "50MB"
+  
   redirect:
     <<: *api
     hostname: redirect
@@ -53,7 +64,7 @@ services:
     deploy:
       resources:
           limits:
-            cpus: "0.1"
+            # cpus: "0.1"
             memory: "50MB"
 
 networks:

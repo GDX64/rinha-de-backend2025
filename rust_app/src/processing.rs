@@ -34,7 +34,7 @@ impl RequestWorker {
         }
 
         let db_service_url = std::env::var("DB_URL").ok().map(|url| {
-            return format!("{}/db-save", url);
+            return format!("http://{}/db-save", url);
         });
         RequestWorker {
             state,
