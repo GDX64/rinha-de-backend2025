@@ -1,8 +1,6 @@
 services:
   db-api:
-    build:
-      context: .
-      dockerfile: dockerfile
+    image: gdx64/rinha2025:latest
     hostname: db-api
     environment:
       - IS_DB_SERVICE=true
@@ -18,9 +16,7 @@ services:
           memory: "50MB"
 
   api1: &api
-    build:
-      context: .
-      dockerfile: dockerfile
+    image: gdx64/rinha2025:latest
     hostname: api1
     environment:
       - DB_URL=db-api:8080
