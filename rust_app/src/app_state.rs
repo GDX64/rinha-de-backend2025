@@ -59,9 +59,9 @@ impl WrappedState {
                     let msg = WebsocketMessage::Payment(msg.to_vec());
                     let bin_message = reqwest_websocket::Message::Binary(msg.to_bytes());
                     websocket
-                        .send(bin_message)
+                        .feed(bin_message)
                         .await
-                        .expect("Failed to send WebSocket message");
+                        .expect("Failed to feed WebSocket message");
                 }
             });
 

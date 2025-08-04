@@ -19,5 +19,7 @@ tokio = {version = "1.46.1", features = ["full"]}
 tracing = {version = "0.1.41", features = ["attributes"]}
 tracing-subscriber = "0.3.19"
 
-# [profile.release]
-# debug = true
+[profile.release]
+lto = "thin" # Enables Link Time Optimization (can use "fat" for more optimization)
+opt-level = 3 # Use "3" for max speed, "z" for smallest binary
+panic = "abort" # Reduces binary size and improves performance

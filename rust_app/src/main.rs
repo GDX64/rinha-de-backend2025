@@ -21,11 +21,11 @@ mod processing;
 #[tokio::main()]
 async fn main() {
     // initialize tracing
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::ERROR)
-        .with_ansi(false)
-        .pretty()
-        .init();
+    // tracing_subscriber::fmt()
+    //     .with_max_level(tracing::Level::ERROR)
+    //     .with_ansi(false)
+    //     .pretty()
+    //     .init();
 
     let state = WrappedState::new(is_db_service())
         .await
