@@ -17,6 +17,7 @@ use tracing::instrument;
 mod app_state;
 mod database;
 mod processing;
+mod stealing_queue;
 
 #[tokio::main()]
 async fn main() {

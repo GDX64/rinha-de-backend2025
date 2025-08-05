@@ -1,5 +1,3 @@
-use std::thread::JoinHandle;
-
 use axum::body::Bytes;
 use reqwest::StatusCode;
 use tokio::{select, sync::mpsc::Receiver};
@@ -8,11 +6,13 @@ use tracing::instrument;
 use crate::{
     PaymentGet, WrappedState,
     database::{PaymentKind, PaymentPost},
+    stealing_queue::{StealingDequeue, StealingQueue},
 };
 
 struct RequestWorker {
     state: WrappedState,
     default_service_url: String,
+    #[allow(dead_code)]
     fallback_service_url: String,
 }
 
@@ -64,8 +64,8 @@ impl RequestWorker {
         }
     }
 
-    async fn payment_loop(mut self, mut recv: Receiver<Bytes>) {
-        while let Some(payload) = recv.recv().await {
+    async fn payment_loop(mut self, recv: StealingDequeue<Bytes>) {
+        while let Some(payload) = recv.pop().await {
             let payload = serde_json::from_slice::<PaymentGet>(&payload);
             let Ok(payload) = payload else {
                 tracing::error!("Failed to deserialize payment: {:?}", payload.err());
@@ -85,18 +85,22 @@ impl RequestWorker {
     }
 }
 
-pub fn create_worker(receiver: Receiver<Bytes>, state: WrappedState) -> JoinHandle<()> {
-    let handle = std::thread::spawn(|| {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("Failed to create tokio runtime");
-        rt.block_on(async move {
-            let worker = RequestWorker::new(state);
-            worker.payment_loop(receiver).await;
-        })
+pub fn create_worker(mut receiver: Receiver<Bytes>, state: WrappedState) {
+    let stealing_queue = StealingQueue::new();
+    let recv: StealingDequeue<Bytes> = stealing_queue.get_dequeue();
+    tokio::spawn(async move {
+        while let Some(bytes) = receiver.recv().await {
+            stealing_queue.push(bytes);
+        }
     });
-    return handle;
+    (0..4).for_each(|_| {
+        let cloned_recv = recv.clone();
+        let state = state.clone();
+        tokio::spawn(async move {
+            let worker = RequestWorker::new(state);
+            worker.payment_loop(cloned_recv).await;
+        });
+    });
 }
 
 enum PaymentTryResult {

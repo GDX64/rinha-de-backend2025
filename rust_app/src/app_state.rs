@@ -1,5 +1,5 @@
 use axum::body::Bytes;
-use futures_util::SinkExt;
+use futures_util::{SinkExt, select};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -59,9 +59,9 @@ impl WrappedState {
                     let msg = WebsocketMessage::Payment(msg.to_vec());
                     let bin_message = reqwest_websocket::Message::Binary(msg.to_bytes());
                     websocket
-                        .feed(bin_message)
+                        .send(bin_message)
                         .await
-                        .expect("Failed to feed WebSocket message");
+                        .expect("Failed to send WebSocket message");
                 }
             });
 
