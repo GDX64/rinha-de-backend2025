@@ -1,5 +1,5 @@
 use axum::body::Bytes;
-use futures_util::{SinkExt, select};
+use futures_util::SinkExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -55,13 +55,19 @@ impl WrappedState {
             let mut websocket = reqwest_websocket::websocket(db_url).await?;
 
             tokio::spawn(async move {
-                while let Some(msg) = ws_receiver.recv().await {
-                    let msg = WebsocketMessage::Payment(msg.to_vec());
+                let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
+                loop {
+                    interval.tick().await;
+                    let mut v = Vec::new();
+                    while let Ok(msg) = ws_receiver.try_recv() {
+                        v.push(msg.to_vec());
+                    }
+                    let msg = WebsocketMessage::Payment(v);
                     let bin_message = reqwest_websocket::Message::Binary(msg.to_bytes());
                     websocket
                         .send(bin_message)
                         .await
-                        .expect("Failed to send WebSocket message");
+                        .expect("Failed to send message");
                 }
             });
 
@@ -129,7 +135,10 @@ impl WrappedState {
                 let data = msg.into_data();
                 let ws_message = WebsocketMessage::from_bytes(data);
                 match ws_message {
-                    WebsocketMessage::Payment(bytes) => self.on_payment_bytes(bytes.into()),
+                    WebsocketMessage::Payment(v) => {
+                        v.into_iter()
+                            .for_each(|bytes| self.on_payment_bytes(bytes.into()));
+                    }
                     WebsocketMessage::None => {}
                 }
             }
@@ -143,7 +152,7 @@ impl WrappedState {
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub enum WebsocketMessage {
-    Payment(Vec<u8>),
+    Payment(Vec<Vec<u8>>),
     None,
 }
 
