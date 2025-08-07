@@ -4,7 +4,8 @@ use tokio::{select, sync::mpsc::Receiver};
 use tracing::instrument;
 
 use crate::{
-    PaymentGet, WrappedState,
+    PaymentGet,
+    app_state::WrappedState,
     database::{PaymentKind, PaymentPost},
     stealing_queue::{StealingDequeue, StealingQueue},
 };

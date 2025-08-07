@@ -106,26 +106,6 @@ async fn payments(State(state): State<WrappedState>, bytes: Bytes) -> StatusCode
     return StatusCode::CREATED;
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
-struct PaymentGet {
-    #[serde(rename = "correlationId")]
-    correlation_id: String,
-    amount: f64,
-}
-
-impl PaymentGet {
-    fn to_payment_post(&self) -> PaymentPost {
-        let unix_now = chrono::Local::now();
-        PaymentPost {
-            correlation_id: self.correlation_id.clone(),
-            amount: self.amount,
-            requested_at: unix_now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-            requested_at_ts: unix_now.timestamp_millis(),
-            processed_on: None,
-        }
-    }
-}
-
 fn is_db_service() -> bool {
     std::env::var("IS_DB_SERVICE")
         .map(|v| v == "true")
