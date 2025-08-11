@@ -6,7 +6,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
-use rinha::app_state::WrappedState;
+use rinha::app_state::{SummaryQuery, WrappedState};
 use std::net::SocketAddr;
 use std::sync::LazyLock;
 use tokio::net::TcpListener;
@@ -29,6 +29,27 @@ async fn hello(req: IncomingRequest) -> Result<BoxBodyType, hyper::Error> {
             Ok(res)
         }
     }
+}
+
+async fn handle_summary(req: IncomingRequest) -> BoxBodyType {
+    if req.method() != method::Method::GET {
+        let mut res = Response::new(empty());
+        *res.status_mut() = http::StatusCode::METHOD_NOT_ALLOWED;
+        return res;
+    }
+    let db_url = std::env::var("DB_URL").expect("DB_URL environment variable is not set");
+    let s = &GLOBAL_STATE;
+    let query_data: SummaryQuery = req.uri().query().expect("Query data is required").into();
+    let value = s.get_from_db_service(&query_data, &db_url).await;
+    let Ok(value) = value else {
+        tracing::error!("Failed to get summary from DB service: {:?}", value.err());
+        let mut res = Response::new(empty());
+        *res.status_mut() = http::StatusCode::INTERNAL_SERVER_ERROR;
+        return res;
+    };
+    let body = full(value.to_string());
+    let res = Response::new(body);
+    return res;
 }
 
 async fn handle_payments(req: IncomingRequest) -> BoxBodyType {

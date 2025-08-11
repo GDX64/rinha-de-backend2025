@@ -88,6 +88,12 @@ pub struct SummaryQuery {
     pub to: Option<String>,
 }
 
+impl From<&str> for SummaryQuery {
+    fn from(query: &str) -> Self {
+        return serde_json::from_str(query).unwrap();
+    }
+}
+
 impl WrappedState {
     pub fn default() -> Self {
         WrappedState {
