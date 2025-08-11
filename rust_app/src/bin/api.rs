@@ -6,8 +6,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
-use rinha::app_state::{SummaryQuery, WrappedState};
-use std::net::SocketAddr;
+use rinha::app_state::WrappedState;
 use std::sync::LazyLock;
 use tokio::net::TcpListener;
 
@@ -18,7 +17,6 @@ static GLOBAL_STATE: LazyLock<WrappedState> = LazyLock::new(|| WrappedState::def
 
 async fn hello(req: IncomingRequest) -> Result<BoxBodyType, hyper::Error> {
     let path = req.uri().path();
-    println!("Received request for path: {}", path);
     match path {
         "/payments" => Ok(handle_payments(req).await),
         "/payments-summary" => Ok(handle_summary(req).await),
@@ -39,8 +37,8 @@ async fn handle_summary(req: IncomingRequest) -> BoxBodyType {
     }
     let db_url = std::env::var("DB_URL").expect("DB_URL environment variable is not set");
     let s = &GLOBAL_STATE;
-    let query_data: SummaryQuery = req.uri().query().expect("Query data is required").into();
-    let value = s.get_from_db_service(&query_data, &db_url).await;
+    let query_data = req.uri().query();
+    let value = s.get_from_db_service(query_data, &db_url).await;
     let Ok(value) = value else {
         tracing::error!("Failed to get summary from DB service: {:?}", value.err());
         let mut res = Response::new(empty());
@@ -91,9 +89,7 @@ where
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
-
-    let listener = TcpListener::bind(addr).await?;
+    let listener = TcpListener::bind("0.0.0.0:8080").await?;
     {
         let s = &GLOBAL_STATE;
         s.init(false).await;

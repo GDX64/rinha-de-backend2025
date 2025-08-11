@@ -88,9 +88,18 @@ pub struct SummaryQuery {
     pub to: Option<String>,
 }
 
+impl Default for SummaryQuery {
+    fn default() -> Self {
+        SummaryQuery {
+            from: None,
+            to: None,
+        }
+    }
+}
+
 impl From<&str> for SummaryQuery {
     fn from(query: &str) -> Self {
-        return serde_json::from_str(query).unwrap();
+        return serde_json::from_str(query).unwrap_or_default();
     }
 }
 
@@ -147,16 +156,16 @@ impl WrappedState {
 
     pub async fn get_from_db_service(
         &self,
-        query_data: &SummaryQuery,
+        query_data: Option<&str>,
         url: &str,
     ) -> anyhow::Result<Value> {
-        let response = self
-            .get_client()
-            .get(format!("http://{}/payments-summary", url))
-            .query(&[
-                ("from", query_data.from.as_ref()),
-                ("to", query_data.to.as_ref()),
-            ])
+        let url = if let Some(query_data) = query_data {
+            format!("http://{}/payments-summary?{}", url, query_data)
+        } else {
+            format!("http://{}/payments-summary", url)
+        };
+        let request = self.get_client().get(url);
+        let response = request
             .send()
             .await?
             .error_for_status()?
