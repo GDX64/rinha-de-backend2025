@@ -1,7 +1,7 @@
 use std::env;
 use std::net::ToSocketAddrs;
 use tokio::io::{self};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
@@ -14,23 +14,31 @@ async fn main() -> io::Result<()> {
         .collect::<Vec<_>>();
 
     let listener = TcpListener::bind(&listen_addr).await?;
-    let mut last_chosen: usize = 0;
+
+    println!("starting conn pool");
+    let mut conns = make_pre_connections(&target_addrs).await;
+    println!("conns ready");
 
     loop {
         let (mut inbound, _) = listener.accept().await?;
-        let target_addr = target_addrs[last_chosen].clone();
-        last_chosen = (last_chosen + 1) % target_addrs.len();
+        let mut connection = conns.pop().unwrap();
 
         tokio::spawn(async move {
-            let connection = TcpStream::connect(target_addr).await;
-            let mut outbound = match connection {
-                Ok(outbound) => outbound,
-                Err(e) => {
-                    eprintln!("Failed to connect to target: {}", e);
-                    return ();
-                }
-            };
-            let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+            let _ = tokio::io::copy_bidirectional(&mut inbound, &mut connection).await;
         });
     }
+}
+
+async fn make_pre_connections(target_addrs: &[std::net::SocketAddr]) -> Vec<tokio::net::TcpStream> {
+    let mut last_chosen = 0;
+    let mut connections = Vec::new();
+    for _ in 0..700 {
+        last_chosen += 1;
+        let addr = target_addrs[last_chosen % target_addrs.len()];
+        let conn = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("Failed to connect to target address");
+        connections.push(conn);
+    }
+    return connections;
 }
