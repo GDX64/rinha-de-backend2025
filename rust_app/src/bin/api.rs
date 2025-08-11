@@ -57,21 +57,21 @@ async fn handle_payments(req: IncomingRequest) -> BoxBodyType {
         return res;
     }
 
-    let c = req.into_body().collect().await;
-    match c {
-        Ok(body) => {
-            let bytes = body.to_bytes();
-            let s = &GLOBAL_STATE;
-            s.on_payment_received(bytes);
-            let res = Response::new(empty());
-            return res;
+    tokio::spawn(async move {
+        let c = req.into_body().collect().await;
+        match c {
+            Ok(body) => {
+                let bytes = body.to_bytes();
+                let s = &GLOBAL_STATE;
+                s.on_payment_received(bytes);
+            }
+            Err(err) => {
+                eprintln!("Error reading request body: {}", err);
+            }
         }
-        Err(err) => {
-            eprintln!("Error reading request body: {}", err);
-            let res = Response::new(empty());
-            return res;
-        }
-    }
+    });
+    let res = Response::new(empty());
+    return res;
 }
 
 #[derive(Clone)]
