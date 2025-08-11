@@ -6,7 +6,6 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
-use rinha::PaymentGet;
 use rinha::app_state::WrappedState;
 use std::net::SocketAddr;
 use std::sync::LazyLock;
@@ -15,14 +14,14 @@ use tokio::net::TcpListener;
 type BoxBodyType = Response<BoxBody<Bytes, hyper::Error>>;
 type IncomingRequest = Request<hyper::body::Incoming>;
 
-static GLOBAL_STATE: LazyLock<WrappedState> = LazyLock::new(|| return WrappedState::new(false));
+static GLOBAL_STATE: LazyLock<WrappedState> = LazyLock::new(|| WrappedState::default());
 
 async fn hello(req: IncomingRequest) -> Result<BoxBodyType, hyper::Error> {
     let path = req.uri().path();
     println!("Received request for path: {}", path);
     match path {
         "/payments" => Ok(handle_payments(req).await),
-        "/payments-summary" => Ok(Response::new(full(Bytes::from("Hello, World!")))),
+        "/payments-summary" => Ok(handle_summary(req).await),
         _ => {
             let mut res = Response::new(empty());
             *res.status_mut() = http::StatusCode::NOT_FOUND;
@@ -38,13 +37,13 @@ async fn handle_payments(req: IncomingRequest) -> BoxBodyType {
         *res.status_mut() = http::StatusCode::METHOD_NOT_ALLOWED;
         return res;
     }
-    let s = &GLOBAL_STATE;
 
     let c = req.into_body().collect().await;
     match c {
         Ok(body) => {
-            let json: PaymentGet = serde_json::from_slice(&body.to_bytes()).unwrap();
-            println!("Received payment: {:?}", json);
+            let bytes = body.to_bytes();
+            let s = &GLOBAL_STATE;
+            s.on_payment_received(bytes);
             let res = Response::new(empty());
             return res;
         }
@@ -74,6 +73,10 @@ async fn main() -> anyhow::Result<()> {
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
 
     let listener = TcpListener::bind(addr).await?;
+    {
+        let s = &GLOBAL_STATE;
+        s.init(false).await;
+    }
 
     loop {
         let (stream, _) = listener.accept().await?;

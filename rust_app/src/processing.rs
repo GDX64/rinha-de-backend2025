@@ -4,8 +4,7 @@ use tokio::{select, sync::mpsc::Receiver};
 use tracing::instrument;
 
 use crate::{
-    PaymentGet,
-    app_state::WrappedState,
+    app_state::{PaymentGet, WrappedState},
     database::{PaymentKind, PaymentPost},
     stealing_queue::{StealingDequeue, StealingQueue},
 };
@@ -44,7 +43,7 @@ impl RequestWorker {
             let res = send_to_service(
                 &payment_post,
                 &self.default_service_url,
-                self.state.client.clone(),
+                self.state.get_client().clone(),
             )
             .await;
 

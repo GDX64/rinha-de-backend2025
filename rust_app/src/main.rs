@@ -10,7 +10,6 @@ use axum::{
     http::StatusCode,
     routing::{any, get, post},
 };
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::instrument;
 
@@ -28,9 +27,8 @@ async fn main() {
     //     .pretty()
     //     .init();
 
-    let state = WrappedState::new(is_db_service())
-        .await
-        .expect("Failed to create WrappedState");
+    let state = WrappedState::default();
+    state.init(is_db_service()).await;
 
     let app = Router::new()
         .route("/payments-summary", get(summary))
@@ -100,7 +98,7 @@ async fn summary(
 
 #[debug_handler]
 async fn payments(State(state): State<WrappedState>, bytes: Bytes) -> StatusCode {
-    let Ok(_) = state.ws.try_send(bytes) else {
+    let Ok(_) = state.with_state(|state| state.ws.try_send(bytes)) else {
         return StatusCode::SERVICE_UNAVAILABLE;
     };
     return StatusCode::CREATED;

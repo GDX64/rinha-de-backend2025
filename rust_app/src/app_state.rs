@@ -10,43 +10,25 @@ use crate::{
     processing::create_worker,
 };
 
-struct AppState {
-    db: PaymentsDb,
-}
-
-pub type PaymentSenderChannel = tokio::sync::mpsc::Sender<Bytes>;
-
-pub type WsChannel = tokio::sync::mpsc::Sender<Bytes>;
-
-#[derive(Clone)]
-pub struct WrappedState {
-    state: Option<Arc<Mutex<AppState>>>,
+pub struct AppState {
+    db: Option<PaymentsDb>,
     pub client: Client,
     pub sender: PaymentSenderChannel,
     pub ws: WsChannel,
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
-pub struct SummaryQuery {
-    pub from: Option<String>,
-    pub to: Option<String>,
-}
-
-impl WrappedState {
-    pub async fn new(is_db_service: bool) -> anyhow::Result<Self> {
+impl AppState {
+    pub async fn new_async(is_db_service: bool) -> anyhow::Result<(Self, PaymentReceiverChannel)> {
         let (ws_sender, mut ws_receiver) = tokio::sync::mpsc::channel(100_000);
         let (sender, receiver) = tokio::sync::mpsc::channel(100_000);
 
         let state = if is_db_service {
-            let state = WrappedState {
-                state: Some(Arc::new(Mutex::new(AppState {
-                    db: PaymentsDb::new().expect("Failed to initialize database"),
-                }))),
+            let state = AppState {
+                db: Some(PaymentsDb::new().expect("Failed to initialize database")),
                 client: Client::new(),
                 sender,
                 ws: ws_sender,
             };
-            create_worker(receiver, state.clone());
             state
         } else {
             let db_url = std::env::var("DB_URL")?;
@@ -71,36 +53,90 @@ impl WrappedState {
                 }
             });
 
-            WrappedState {
-                state: None,
+            AppState {
+                db: None,
                 client: Client::new(),
                 sender,
                 ws: ws_sender,
             }
         };
-        Ok(state)
+        return Ok((state, receiver));
     }
 
-    fn with_state<F, R>(&self, f: F) -> R
+    fn default() -> Self {
+        AppState {
+            db: None,
+            client: Client::new(),
+            sender: tokio::sync::mpsc::channel(100_000).0,
+            ws: tokio::sync::mpsc::channel(100_000).0,
+        }
+    }
+}
+
+pub type PaymentSenderChannel = tokio::sync::mpsc::Sender<Bytes>;
+type PaymentReceiverChannel = tokio::sync::mpsc::Receiver<Bytes>;
+pub type WsChannel = tokio::sync::mpsc::Sender<Bytes>;
+
+#[derive(Clone)]
+pub struct WrappedState {
+    state: Arc<Mutex<AppState>>,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct SummaryQuery {
+    pub from: Option<String>,
+    pub to: Option<String>,
+}
+
+impl WrappedState {
+    pub fn default() -> Self {
+        WrappedState {
+            state: Arc::new(Mutex::new(AppState::default())),
+        }
+    }
+
+    pub async fn init(&self, is_db_service: bool) {
+        let (state, receiver) = AppState::new_async(is_db_service)
+            .await
+            .expect("Failed to initialize state");
+        *self.state.lock().unwrap() = state;
+        if is_db_service {
+            create_worker(receiver, self.clone());
+        }
+    }
+
+    pub fn with_state<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&AppState) -> R,
     {
-        let state = self.state.as_ref().expect("State is not initialized");
-        let state = state.lock().unwrap();
+        let state = self.state.lock().unwrap();
         f(&state)
     }
 
     pub fn add_on_db(&self, payment: PaymentPost) -> anyhow::Result<()> {
         return self.with_state(|state| {
-            return state.db.insert_payment(&payment);
+            return state.db.as_ref().unwrap().insert_payment(&payment);
         });
     }
 
     pub fn get_state(&self, query_data: &SummaryQuery) -> anyhow::Result<Stats> {
         let start = query_data.from.as_ref().map(|s| s.as_str());
         let end = query_data.to.as_ref().map(|s| s.as_str());
-        let values = self.with_state(|state| state.db.get_stats(start, end))?;
+        let values = self.with_state(|state| state.db.as_ref().unwrap().get_stats(start, end))?;
         Ok(values)
+    }
+
+    pub fn get_client(&self) -> Client {
+        self.with_state(|state| state.client.clone())
+    }
+
+    pub fn on_payment_received(&self, bytes: Bytes) {
+        self.with_state(|state| {
+            state
+                .ws
+                .try_send(bytes)
+                .expect("Failed to send payment bytes");
+        });
     }
 
     pub async fn get_from_db_service(
@@ -109,7 +145,7 @@ impl WrappedState {
         url: &str,
     ) -> anyhow::Result<Value> {
         let response = self
-            .client
+            .get_client()
             .get(format!("http://{}/payments-summary", url))
             .query(&[
                 ("from", query_data.from.as_ref()),
@@ -124,9 +160,12 @@ impl WrappedState {
     }
 
     fn on_payment_bytes(&self, bytes: Bytes) {
-        self.sender
-            .try_send(bytes)
-            .expect("Failed to send payment bytes");
+        self.with_state(|state| {
+            return state
+                .sender
+                .try_send(bytes.clone())
+                .expect("Failed to send payment bytes");
+        });
     }
 
     pub async fn on_websocket(self, mut socket: axum::extract::ws::WebSocket) {
@@ -172,5 +211,25 @@ impl WebsocketMessage {
             return Bytes::new();
         };
         return Bytes::from(bytes);
+    }
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct PaymentGet {
+    #[serde(rename = "correlationId")]
+    pub correlation_id: String,
+    pub amount: f64,
+}
+
+impl PaymentGet {
+    pub fn to_payment_post(&self) -> crate::database::PaymentPost {
+        let unix_now = chrono::Local::now();
+        crate::database::PaymentPost {
+            correlation_id: self.correlation_id.clone(),
+            amount: self.amount,
+            requested_at: unix_now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            requested_at_ts: unix_now.timestamp_millis(),
+            processed_on: None,
+        }
     }
 }
