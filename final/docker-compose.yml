@@ -9,10 +9,11 @@ services:
     networks:
       - backend
       - payment-processor
+    command: ["/db_api"]
     deploy:
       resources:
         limits:
-          cpus: "0.3"
+          cpus: "0.5"
           memory: "50MB"
 
   api1: &api
@@ -23,12 +24,13 @@ services:
     networks:
       - backend
       - payment-processor
+    command: ["/api"]
     depends_on:
       - db-api
     deploy:
       resources:
         limits:
-          cpus: "0.5"
+          cpus: "0.4"
           memory: "50MB"
 
   api2:
@@ -39,7 +41,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.5"
+          cpus: "0.4"
           memory: "50MB"
   
   redirect:
