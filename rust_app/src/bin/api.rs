@@ -87,8 +87,16 @@ where
     }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .event_interval(1)
+        .build()
+        .expect("Failed to create Tokio runtime");
+    return rt.block_on(main_async());
+}
+
+async fn main_async() -> anyhow::Result<()> {
     let listener = TcpListener::bind("0.0.0.0:8080").await?;
     {
         let s = &GLOBAL_STATE;
