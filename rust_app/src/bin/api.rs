@@ -91,6 +91,7 @@ fn main() -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .event_interval(1)
+        .global_queue_interval(1)
         .build()
         .expect("Failed to create Tokio runtime");
     return rt.block_on(main_async());
