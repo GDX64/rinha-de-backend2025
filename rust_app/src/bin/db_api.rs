@@ -60,7 +60,6 @@ async fn websocket_handler(
     State(state): State<WrappedState>,
     ws: axum::extract::ws::WebSocketUpgrade,
 ) -> axum::response::Response {
-    println!("WebSocket connection requested");
     return ws.on_upgrade(move |socket| {
         return state.on_websocket(socket);
     });

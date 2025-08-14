@@ -33,7 +33,6 @@ impl AppState {
         } else {
             let db_url = std::env::var("DB_URL")?;
             let db_url = format!("ws://{db_url}/ws");
-            println!("Connecting to WebSocket at: {}", db_url);
             let mut websocket = reqwest_websocket::websocket(db_url).await?;
 
             tokio::spawn(async move {
