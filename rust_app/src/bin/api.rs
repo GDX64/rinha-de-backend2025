@@ -8,7 +8,7 @@ use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use rinha::app_state::WrappedState;
 use std::sync::LazyLock;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, UnixListener};
 
 type BoxBodyType = Response<BoxBody<Bytes, hyper::Error>>;
 type IncomingRequest = Request<hyper::body::Incoming>;
@@ -97,8 +97,34 @@ fn main() -> anyhow::Result<()> {
     return rt.block_on(main_async());
 }
 
+#[cfg(unix)]
 async fn main_async() -> anyhow::Result<()> {
-    let listener = TcpListener::bind("0.0.0.0:8080").await?;
+    let env_sock = std::env::var("SOCKET_PATH").expect("socket path was not set");
+    let listener = UnixListener::bind(&env_sock)?;
+    {
+        let s = &GLOBAL_STATE;
+        s.init(false).await;
+    }
+
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let io = TokioIo::new(stream);
+
+        tokio::task::spawn(async move {
+            if let Err(err) = http1::Builder::new()
+                .serve_connection(io, service_fn(hello))
+                .await
+            {
+                eprintln!("Error serving connection: {}", err);
+            }
+        });
+    }
+}
+
+#[cfg(windows)]
+async fn main_async() -> anyhow::Result<()> {
+    let socket_path = std::env::var("SOCKET_PATH").expect("socket path was not set");
+    let listener = TcpListener::bind(&socket_path)?;
     {
         let s = &GLOBAL_STATE;
         s.init(false).await;
