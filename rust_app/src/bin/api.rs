@@ -8,7 +8,7 @@ use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use rinha::app_state::WrappedState;
 use std::sync::LazyLock;
-use tokio::net::{TcpListener, UnixListener};
+use tokio::net::TcpListener;
 
 type BoxBodyType = Response<BoxBody<Bytes, hyper::Error>>;
 type IncomingRequest = Request<hyper::body::Incoming>;
@@ -99,6 +99,7 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(unix)]
 async fn main_async() -> anyhow::Result<()> {
+    use tokio::net::UnixListener;
     let env_sock = std::env::var("SOCKET_PATH").expect("socket path was not set");
     let listener = UnixListener::bind(&env_sock)?;
     {
@@ -124,7 +125,7 @@ async fn main_async() -> anyhow::Result<()> {
 #[cfg(windows)]
 async fn main_async() -> anyhow::Result<()> {
     let socket_path = std::env::var("SOCKET_PATH").expect("socket path was not set");
-    let listener = TcpListener::bind(&socket_path)?;
+    let listener = TcpListener::bind(&socket_path).await?;
     {
         let s = &GLOBAL_STATE;
         s.init(false).await;

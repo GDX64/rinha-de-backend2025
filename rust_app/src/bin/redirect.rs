@@ -1,10 +1,11 @@
 #[cfg(unix)]
 async fn main_async() -> anyhow::Result<()> {
-    use std::{env, net::ToSocketAddrs};
+    use std::env;
+    use tokio::net::TcpListener;
     use tokio::net::UnixStream;
     // Set the address to listen on and the target to redirect to
-    let listen_addr = env::var("LISTEN_ADDR").unwrap_or_else(|_| "127.0.0.1:9999".to_string());
-    let target_addrs = env::var("TARGET_ADDRS").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
+    let listen_addr = env::var("LISTEN_ADDR").expect("no LISTEN_ADDR env set");
+    let target_addrs = env::var("TARGET_ADDRS").expect("no TARGET_ADDRS set");
     let target_addrs = target_addrs
         .split(',')
         .map(|s| s.to_string())
