@@ -1,6 +1,7 @@
 use axum::body::Bytes;
 use futures_util::SinkExt;
 use reqwest::Client;
+use reqwest_websocket::RequestBuilderExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
@@ -18,8 +19,8 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub async fn new_async(is_db_service: bool) -> anyhow::Result<(Self, PaymentReceiverChannel)> {
-        let (ws_sender, mut ws_receiver) = tokio::sync::mpsc::channel(100_000);
+    pub fn new_async(is_db_service: bool) -> anyhow::Result<(Self, PaymentReceiverChannel)> {
+        let (ws_sender, ws_receiver) = tokio::sync::mpsc::channel(100_000);
         let (sender, receiver) = tokio::sync::mpsc::channel(100_000);
 
         let state = if is_db_service {
@@ -33,24 +34,8 @@ impl AppState {
         } else {
             let db_url = std::env::var("DB_URL")?;
             let db_url = format!("ws://{db_url}/ws");
-            let mut websocket = reqwest_websocket::websocket(db_url).await?;
 
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_millis(30));
-                loop {
-                    interval.tick().await;
-                    let mut v = Vec::new();
-                    while let Ok(msg) = ws_receiver.try_recv() {
-                        v.push(msg.to_vec());
-                    }
-                    let msg = WebsocketMessage::Payment(v);
-                    let bin_message = reqwest_websocket::Message::Binary(msg.to_bytes());
-                    websocket
-                        .send(bin_message)
-                        .await
-                        .expect("Failed to send message");
-                }
-            });
+            tokio::spawn(make_websocket_worker(db_url, ws_receiver));
 
             AppState {
                 db: None,
@@ -109,10 +94,9 @@ impl WrappedState {
         }
     }
 
-    pub async fn init(&self, is_db_service: bool) {
-        let (state, receiver) = AppState::new_async(is_db_service)
-            .await
-            .expect("Failed to initialize state");
+    pub fn init(&self, is_db_service: bool) {
+        let (state, receiver) =
+            AppState::new_async(is_db_service).expect("Failed to initialize state");
         *self.state.lock().unwrap() = state;
         if is_db_service {
             create_worker(receiver, self.clone());
@@ -245,5 +229,33 @@ impl PaymentGet {
             requested_at_ts: unix_now.timestamp_millis(),
             processed_on: None,
         }
+    }
+}
+
+async fn make_websocket_worker(
+    db_url: String,
+    mut ws_receiver: tokio::sync::mpsc::Receiver<Bytes>,
+) -> anyhow::Result<()> {
+    let mut websocket = Client::builder()
+        .build()?
+        .get(db_url)
+        .upgrade()
+        .send()
+        .await?
+        .into_websocket()
+        .await?;
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(30));
+    loop {
+        interval.tick().await;
+        let mut v = Vec::new();
+        while let Ok(msg) = ws_receiver.try_recv() {
+            v.push(msg.to_vec());
+        }
+        let msg = WebsocketMessage::Payment(v);
+        let bin_message = reqwest_websocket::Message::Binary(msg.to_bytes());
+        websocket
+            .send(bin_message)
+            .await
+            .expect("Failed to send message");
     }
 }

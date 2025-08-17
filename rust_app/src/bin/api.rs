@@ -128,7 +128,7 @@ async fn main_async() -> anyhow::Result<()> {
     let listener = TcpListener::bind(&socket_path).await?;
     {
         let s = &GLOBAL_STATE;
-        s.init(false).await;
+        s.init(false);
     }
 
     loop {

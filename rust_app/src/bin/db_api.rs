@@ -23,7 +23,7 @@ async fn main() {
     //     .init();
 
     let state = WrappedState::default();
-    state.init(true).await;
+    state.init(true);
 
     let app = Router::new()
         .route("/payments-summary", get(summary))
