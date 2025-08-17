@@ -4,11 +4,12 @@ use axum::{
     debug_handler,
     extract::{Query, State},
     http::StatusCode,
-    routing::{any, get, post},
+    routing::{get, post},
 };
 use rinha::{
     app_state::{SummaryQuery, WrappedState},
     database::PaymentPost,
+    internal_socket::create_server,
 };
 use serde_json::Value;
 use tracing::instrument;
@@ -23,13 +24,17 @@ async fn main() {
     //     .init();
 
     let state = WrappedState::default();
+    let uds_db_socket = std::env::var("DB_UDS_PATH").expect("DB_UDS_PATH not set");
+    let other = state.clone();
+    create_server(&uds_db_socket, move |ws| {
+        other.clone().on_websocket(ws);
+    });
     state.init(true);
 
     let app = Router::new()
         .route("/payments-summary", get(summary))
         .route("/payments", post(payments))
         .route("/db-save", post(db_save))
-        .route("/ws", any(websocket_handler))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
@@ -54,15 +59,6 @@ async fn db_save(
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
-}
-
-async fn websocket_handler(
-    State(state): State<WrappedState>,
-    ws: axum::extract::ws::WebSocketUpgrade,
-) -> axum::response::Response {
-    return ws.on_upgrade(move |socket| {
-        return state.on_websocket(socket);
-    });
 }
 
 #[instrument(skip(state))]

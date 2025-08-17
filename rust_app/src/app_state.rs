@@ -1,13 +1,14 @@
 use axum::body::Bytes;
-use futures_util::SinkExt;
+use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
-use reqwest_websocket::RequestBuilderExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
+use tokio_tungstenite::tungstenite;
 
 use crate::{
     database::{PaymentPost, PaymentsDb, Stats},
+    internal_socket::{self, OpaqueWS},
     processing::create_worker,
 };
 
@@ -32,10 +33,7 @@ impl AppState {
             };
             state
         } else {
-            let db_url = std::env::var("DB_URL")?;
-            let db_url = format!("ws://{db_url}/ws");
-
-            tokio::spawn(make_websocket_worker(db_url, ws_receiver));
+            tokio::spawn(make_websocket_worker(ws_receiver));
 
             AppState {
                 db: None,
@@ -166,9 +164,9 @@ impl WrappedState {
         });
     }
 
-    pub async fn on_websocket(self, mut socket: axum::extract::ws::WebSocket) {
-        let res = tokio::spawn(async move {
-            while let Some(Ok(msg)) = socket.recv().await {
+    pub fn on_websocket(self, mut socket: OpaqueWS) {
+        tokio::spawn(async move {
+            while let Some(Ok(msg)) = socket.next().await {
                 let data = msg.into_data();
                 let ws_message = WebsocketMessage::from_bytes(data);
                 match ws_message {
@@ -179,11 +177,7 @@ impl WrappedState {
                     WebsocketMessage::None => {}
                 }
             }
-        })
-        .await;
-        if let Err(e) = res {
-            tracing::error!("WebSocket handler failed: {:?}", e);
-        }
+        });
     }
 }
 
@@ -233,17 +227,10 @@ impl PaymentGet {
 }
 
 async fn make_websocket_worker(
-    db_url: String,
     mut ws_receiver: tokio::sync::mpsc::Receiver<Bytes>,
 ) -> anyhow::Result<()> {
-    let mut websocket = Client::builder()
-        .build()?
-        .get(db_url)
-        .upgrade()
-        .send()
-        .await?
-        .into_websocket()
-        .await?;
+    let uds_db_socket = std::env::var("DB_UDS_PATH").expect("DB_UDS_PATH not set");
+    let mut websocket = internal_socket::make_client(&uds_db_socket).await;
     let mut interval = tokio::time::interval(std::time::Duration::from_millis(30));
     loop {
         interval.tick().await;
@@ -252,7 +239,7 @@ async fn make_websocket_worker(
             v.push(msg.to_vec());
         }
         let msg = WebsocketMessage::Payment(v);
-        let bin_message = reqwest_websocket::Message::Binary(msg.to_bytes());
+        let bin_message = tungstenite::Message::Binary(msg.to_bytes());
         websocket
             .send(bin_message)
             .await

@@ -8,6 +8,7 @@ services:
       - IS_DB_SERVICE=true
       - DEFAULT_PAYMENT=http://payment-processor-default:8080
       - FALLBACK_PAYMENT=http://payment-processor-fallback:8080
+      - DB_UDS_PATH=/tmp/db.sock
     networks:
       - backend
       - payment-processor
@@ -30,6 +31,7 @@ services:
     environment:
       - DB_URL=db-api:8080
       - SOCKET_PATH=/tmp/api1.sock
+      - DB_UDS_PATH=/tmp/db.sock
     networks:
       - backend
       - payment-processor
@@ -50,6 +52,7 @@ services:
     environment:
       - DB_URL=db-api:8080
       - SOCKET_PATH=/tmp/api2.sock
+      - DB_UDS_PATH=/tmp/db.sock
     deploy:
       resources:
         limits:

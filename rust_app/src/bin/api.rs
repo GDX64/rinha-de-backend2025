@@ -104,7 +104,7 @@ async fn main_async() -> anyhow::Result<()> {
     let listener = UnixListener::bind(&env_sock)?;
     {
         let s = &GLOBAL_STATE;
-        s.init(false).await;
+        s.init(false);
     }
 
     loop {

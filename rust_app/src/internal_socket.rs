@@ -61,13 +61,13 @@ mod internal_ws {
             let ws = make_client("127.0.0.1:8080").await;
             println!("client connected");
             let (mut write, mut read) = ws.split();
-            let t2 = tokio::spawn(async move {
+            tokio::spawn(async move {
                 while let Some(msg) = read.next().await {
                     let msg = msg.expect("Failed to read message");
                     println!("Received: {}", msg);
                 }
             });
-            let t3 = tokio::spawn(async move {
+            tokio::spawn(async move {
                 let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
                 loop {
                     interval.tick().await;
@@ -116,10 +116,12 @@ mod internal_ws {
 
     pub async fn make_client(addr: &str) -> OpaqueWS {
         let stream = UnixStream::connect(addr).await.expect("Failed to connect");
-        let (ws_stream, _) = tokio_tungstenite::client_async(format!("ws://{}", addr), stream)
+        let (ws_stream, _) = tokio_tungstenite::client_async("ws://localhost", stream)
             .await
             .expect("Failed to connect");
 
         return ws_stream;
     }
 }
+
+pub use internal_ws::*;
