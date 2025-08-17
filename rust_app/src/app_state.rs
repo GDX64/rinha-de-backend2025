@@ -36,7 +36,7 @@ impl AppState {
             let mut websocket = reqwest_websocket::websocket(db_url).await?;
 
             tokio::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_millis(1));
+                let mut interval = tokio::time::interval(std::time::Duration::from_millis(30));
                 loop {
                     interval.tick().await;
                     let mut v = Vec::new();
